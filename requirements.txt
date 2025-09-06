@@ -1,0 +1,37 @@
+# AI News Assistant Bot - Dependencies
+
+# Core Framework
+python-telegram-bot==20.7
+asyncio==3.4.3
+
+# Database
+SQLAlchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# AI and HTTP
+openai==1.12.0
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Scheduler
+APScheduler==3.10.4
+
+# Data Processing
+pandas==2.1.4
+numpy==1.24.4
+
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.5.2
+loguru==0.7.2
+
+# Development (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0
+
+# Production
+gunicorn==21.2.0
+uvicorn==0.24.0

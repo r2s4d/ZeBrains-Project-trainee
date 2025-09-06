@@ -1,0 +1,33 @@
+# ==================== НАСТРОЙКИ БАЗЫ ДАННЫХ POSTGRESQL ====================
+DB_USER=egor
+DB_PASSWORD=
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=ai_news_assistant
+
+# ==================== НАСТРОЙКИ TELEGRAM BOT ====================
+# Получите токен у @BotFather в Telegram
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# ==================== НАСТРОЙКИ OPENAI ====================
+# Получите API ключ на https://platform.openai.com/
+OPENAI_API_KEY=your_openai_api_key_here
+
+# ==================== НАСТРОЙКИ REDIS (ДЛЯ КЭШИРОВАНИЯ) ====================
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+
+# ==================== НАСТРОЙКИ ПРИЛОЖЕНИЯ ====================
+DEBUG=True
+LOG_LEVEL=INFO
+
+# ==================== ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ ====================
+# ID администраторов бота (через запятую)
+ADMIN_USER_IDS=123456789,987654321
+
+# Канал для публикации новостей
+NEWS_CHANNEL_ID=@your_news_channel
+
+# Максимальное количество новостей для обработки за раз
+MAX_NEWS_PER_BATCH=10 

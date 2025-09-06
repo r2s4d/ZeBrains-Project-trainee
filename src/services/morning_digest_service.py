@@ -1,0 +1,1279 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Morning Digest Service - сервис для автоматической отправки утренних дайджестов.
+Создает краткие саммари новостей за последние 24 часа и отправляет кураторам.
+"""
+
+import logging
+import json
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+import asyncio
+from telegram import InlineKeyboardButton
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class DigestNews:
+    """Новость для дайджеста."""
+    id: int
+    title: str
+    summary: str
+    importance_score: int
+    category: str
+    source_links: str
+    published_at: datetime
+    curator_id: Optional[str] = None
+
+@dataclass
+class MorningDigest:
+    """Утренний дайджест."""
+    date: datetime
+    news_count: int
+    news_items: List[DigestNews]
+    total_importance: float
+    categories: List[str]
+    curator_id: Optional[str] = None
+
+class MorningDigestService:
+    """
+    Сервис для создания и отправки утренних дайджестов согласно ФТ.
+    """
+    
+    def __init__(self, 
+                 database_service,
+                 ai_analysis_service,
+                 notification_service,
+                 curator_service,
+                 curators_chat_id: str = "-1002983482030",
+                 expert_selection_service=None,
+                 bot=None):
+        """
+        Инициализация сервиса.
+        
+        Args:
+            database_service: Сервис для работы с базой данных
+            ai_analysis_service: Сервис AI анализа
+            notification_service: Сервис уведомлений
+            curator_service: Сервис кураторов
+            expert_selection_service: Сервис выбора эксперта
+            bot: Telegram bot для отправки сообщений
+            curators_chat_id: ID чата кураторов
+        """
+        self.db = database_service
+        self.ai_service = ai_analysis_service
+        self.notification = notification_service
+        self.curator_service = curator_service
+
+        self.expert_selection_service = expert_selection_service
+        self.bot = bot
+        self.curators_chat_id = curators_chat_id
+        
+        # Система отслеживания ID сообщений дайджеста в базе данных
+        # self.digest_sessions = {}  # Убираем словарь в памяти
+        
+        logger.info(f"✅ MorningDigestService инициализирован (чат кураторов: {curators_chat_id})")
+    
+    async def create_morning_digest(self, curator_id: Optional[str] = None) -> MorningDigest:
+        """
+        Создает утренний дайджест новостей за последние 24 часа.
+        
+        Args:
+            curator_id: ID куратора (если None - для всех кураторов)
+            
+        Returns:
+            MorningDigest: Готовый дайджест
+        """
+        try:
+            logger.info("🌅 Создаем утренний дайджест...")
+            
+            # Получаем новости за последние 24 часа
+            news_items = await self._get_recent_news(hours=24)
+            
+            if not news_items:
+                logger.info("📭 Новостей за последние 24 часа не найдено")
+                return self._create_empty_digest()
+            
+            # Создаем краткие саммари для каждой новости
+            digest_news = []
+            total_importance = 0
+            categories = set()
+            
+            for news in news_items:
+                # Создаем краткое саммари (используем AI или fallback)
+                summary = await self._create_news_summary(news)
+                
+                # Создаем объект для дайджеста
+                digest_item = DigestNews(
+                    id=news.id,
+                    title=news.title,
+                    summary=summary,
+                    importance_score=news.importance_score or 5,
+                    category=news.category or "Общие",
+                    source_links=news.source_url or "",
+                    published_at=news.published_at or news.created_at,
+                    curator_id=news.curator_id
+                )
+                
+                # Логируем создание элемента дайджеста
+                logger.info(f"📰 Создан элемент дайджеста: ID={news.id}, Title='{news.title[:50]}...'")
+                    
+                digest_news.append(digest_item)
+                total_importance += digest_item.importance_score
+                categories.add(digest_item.category)
+            
+            # Сортируем по важности (от высокой к низкой)
+            digest_news.sort(key=lambda x: x.importance_score, reverse=True)
+            
+            # Создаем дайджест
+            digest = MorningDigest(
+                date=datetime.now(),
+                news_count=len(digest_news),
+                news_items=digest_news,
+                total_importance=total_importance / len(digest_news) if digest_news else 0,
+                categories=list(categories),
+                curator_id=curator_id
+            )
+            
+            logger.info(f"✅ Дайджест создан: {digest.news_count} новостей")
+            return digest
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания дайджеста: {e}")
+            return self._create_empty_digest()
+    
+    async def _get_recent_news(self, hours: int = 24) -> List[Any]:
+        """
+        Получает новости за последние N часов с AI-фильтрацией по релевантности.
+        
+        Args:
+            hours: Количество часов для поиска
+            
+        Returns:
+            List: Список отфильтрованных новостей
+        """
+        try:
+            # Вычисляем время начала периода
+            start_time = datetime.now() - timedelta(hours=hours)
+            
+            # Получаем реальные новости из базы данных
+            if self.db:
+                try:
+                    # Получаем новости за последние N часов
+                    recent_news = await self.db.get_news_since(start_time)
+                    
+                    if recent_news:
+                        logger.info(f"📰 Найдено {len(recent_news)} реальных новостей за последние {hours} часов")
+                        
+                        # Фильтруем новости по релевантности
+                        filtered_news = await self._filter_news_by_relevance(recent_news)
+                        
+                        logger.info(f"🔍 После AI-фильтрации осталось {len(filtered_news)} релевантных новостей")
+                        return filtered_news
+                    else:
+                        logger.info(f"📰 Новости за последние {hours} часов не найдены")
+                        return []
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось получить новости из БД: {e}")
+                    logger.info("📰 Используем fallback: пустой список новостей")
+                    return []
+            else:
+                logger.warning("⚠️ Database service недоступен")
+                return []
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения новостей: {e}")
+            return []
+    
+    async def _filter_news_by_relevance(self, news_list: List[Any]) -> List[Any]:
+        """
+        Фильтрует новости по релевантности для ИИ-дайджеста.
+        
+        Args:
+            news_list: Список новостей для фильтрации
+            
+        Returns:
+            List: Отфильтрованный список новостей
+        """
+        try:
+            if not news_list:
+                return []
+            
+            logger.info(f"🔍 Начинаем AI-фильтрацию {len(news_list)} новостей...")
+            
+            filtered_news = []
+            total_news = len(news_list)
+            
+            for i, news in enumerate(news_list, 1):
+                try:
+                    # Получаем заголовок и содержание новости
+                    title = getattr(news, 'title', '') or getattr(news, 'raw_content', '')[:100]
+                    content = getattr(news, 'content', '') or getattr(news, 'raw_content', '')
+                    
+                    if not title and not content:
+                        logger.warning(f"⚠️ Новость {i}/{total_news}: пустой заголовок и содержание")
+                        continue
+                    
+                    # Анализируем релевантность через AI
+                    if self.ai_service:
+                        try:
+                            relevance_score = await self.ai_service.analyze_news_relevance(title, content)
+                            
+                            if relevance_score is not None and relevance_score >= 6:
+                                filtered_news.append(news)
+                                logger.info(f"✅ Новость {i}/{total_news}: релевантность {relevance_score}/10 - ВКЛЮЧЕНА")
+                            else:
+                                logger.info(f"❌ Новость {i}/{total_news}: релевантность {relevance_score}/10 - ИСКЛЮЧЕНА")
+                                
+                        except Exception as e:
+                            logger.warning(f"⚠️ Ошибка AI анализа новости {i}/{total_news}: {e}")
+                            # При ошибке AI включаем новость (fallback)
+                            filtered_news.append(news)
+                            logger.info(f"✅ Новость {i}/{total_news}: включена по fallback (ошибка AI)")
+                    else:
+                        # Если AI недоступен, используем fallback
+                        logger.warning("⚠️ AI сервис недоступен, используем fallback фильтрацию")
+                        filtered_news = news_list
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки новости {i}/{total_news}: {e}")
+                    continue
+            
+            logger.info(f"🔍 AI-фильтрация завершена: {len(filtered_news)}/{total_news} новостей прошли фильтр")
+            return filtered_news
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка AI-фильтрации: {e}")
+            # При ошибке возвращаем все новости
+            logger.warning("⚠️ Возвращаем все новости из-за ошибки фильтрации")
+            return news_list
+    
+    async def _create_news_summary(self, news: Any) -> str:
+        """
+        Создает краткое саммари для новости.
+        
+        Args:
+            news: Объект новости
+            
+        Returns:
+            str: Краткое саммари
+        """
+        try:
+            # Пытаемся использовать AI сервис
+            if self.ai_service:
+                try:
+                    # Анализируем новость через AI
+                    analysis = await self.ai_service.analyze_news(
+                        title=news.title,
+                        content=news.content,
+                        source_links=news.source_url or ""
+                    )
+                    
+                    if analysis and hasattr(analysis, 'summary') and analysis.summary:
+                        return analysis.summary
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ AI анализ не удался, используем fallback: {e}")
+            
+            # Fallback: создаем простое саммари
+            return self._create_fallback_summary(news)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания саммари: {e}")
+            return self._create_fallback_summary(news)
+    
+    def _create_fallback_summary(self, news: Any) -> str:
+        """
+        Создает простое саммари без AI.
+        
+        Args:
+            news: Объект новости
+            
+        Returns:
+            str: Простое саммари
+        """
+        try:
+            # Берем первые 2-3 предложения из заголовка и контента
+            content = f"{news.title}. {news.content}"
+            sentences = content.split('.')[:3]
+            
+            # Очищаем и объединяем
+            summary = '. '.join([s.strip() for s in sentences if s.strip()]) + '.'
+            
+            # Ограничиваем длину
+            if len(summary) > 100:
+                summary = summary[:97] + '...'
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка fallback саммари: {e}")
+            return f"Новость: {news.title[:50]}..."
+    
+    def format_digest_for_telegram(self, digest: MorningDigest) -> str:
+        """
+        Форматирует дайджест для Telegram согласно ФТ.
+        
+        Args:
+            digest: Объект дайджеста
+            
+        Returns:
+            str: Отформатированный дайджест
+        """
+        try:
+            if digest.news_count == 0:
+                return "📭 Новостей для дайджеста не найдено."
+            
+            # Заголовок дайджеста
+            formatted_digest = f"""
+🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ ИИ НОВОСТЕЙ</b>
+📅 {digest.date.strftime('%d.%m.%Y %H:%M')}
+📊 Всего новостей: {digest.news_count}
+
+"""
+            
+            # Список новостей (по ФТ - только заголовок, саммари, источник)
+            for i, news in enumerate(digest.news_items, 1):
+                formatted_digest += f"""
+<b>{i}. {news.title}</b>
+📝 {news.summary}
+➡️ Источник: {self._extract_channel_username(news.source_links) if news.source_links else 'Не указан'}
+
+"""
+            
+            # Футер с вопросом кураторам (по ФТ)
+            formatted_digest += """
+<b>Вопрос кураторам:</b> Можно ли отправить эти новости экспертам?
+
+🤖 <i>Создано автоматически системой PR-ассистента ZeBrains</i>
+"""
+            
+            return formatted_digest.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования дайджеста: {e}")
+            return f"❌ Ошибка форматирования дайджеста: {str(e)}"
+    
+    def format_digest_with_moderation_buttons(self, digest: MorningDigest) -> str:
+        """
+        Форматирует дайджест с кнопками модерации для кураторов.
+        
+        Args:
+            digest: Объект дайджеста
+            
+        Returns:
+            str: Отформатированный дайджест с инструкциями по модерации
+        """
+        try:
+            if digest.news_count == 0:
+                return "📭 Новостей для дайджеста не найдено."
+            
+            # Заголовок дайджеста
+            formatted_digest = f"""
+🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ ДЛЯ МОДЕРАЦИИ</b>
+📅 {digest.date.strftime('%d.%m.%Y %H:%M')}
+📊 Всего новостей: {digest.news_count}
+
+"""
+            
+            # Список новостей с инструкциями по модерации
+            for i, news in enumerate(digest.news_items, 1):
+                formatted_digest += f"""
+<b>{i}. {news.title}</b>
+📝 {news.summary}
+⭐ Важность: {news.importance_score}/10
+🏷️ Категория: {news.category}
+➡️ Источник: {news.source_links}
+
+<code>Команды для модерации:</code>
+✅ /approve_news {news.id} - Одобрить новость
+❌ /reject_news {news.id} - Отклонить новость
+
+"""
+            
+            # Инструкции по модерации
+            formatted_digest += """
+<b>📋 ИНСТРУКЦИИ ПО МОДЕРАЦИИ:</b>
+
+1️⃣ <b>Просмотрите каждую новость</b> и решите, стоит ли её публиковать
+2️⃣ <b>Используйте команды</b> /approve_news или /reject_news для каждой новости
+3️⃣ <b>После модерации</b> используйте /complete_moderation для завершения
+4️⃣ <b>Выберите эксперта</b> для одобренных новостей командой /select_expert
+
+💡 <i>Модерация обязательна для всех новостей!</i>
+"""
+            
+            return formatted_digest.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования дайджеста с кнопками модерации: {e}")
+            return f"❌ Ошибка форматирования дайджеста: {str(e)}"
+    
+    def _generate_post_link(self, news: DigestNews) -> str:
+        """
+        Генерирует прямую ссылку на пост в Telegram.
+        
+        Args:
+            news: Объект новости для дайджеста
+            
+        Returns:
+            str: Прямая ссылка на пост или fallback
+        """
+        try:
+            # Проверяем, есть ли source_links
+            if not news.source_links:
+                return "Источник не указан"
+            
+            # Если это уже прямая ссылка на t.me
+            if 't.me/' in news.source_links and '/' in news.source_links.split('t.me/')[1]:
+                return news.source_links
+            
+            # Если это username канала, создаем ссылку на канал
+            if news.source_links.startswith('@'):
+                channel = news.source_links[1:]  # Убираем @
+                return f"https://t.me/{channel}"
+            
+            # Fallback - возвращаем как есть
+            return news.source_links
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка генерации ссылки на пост: {e}")
+            return "Источник не указан"
+    
+    async def send_digest_to_curators_chat(self, digest: MorningDigest, chat_id: str) -> bool:
+        """
+        Отправляет интерактивный дайджест в чат кураторов согласно ФТ.
+        Разбивает длинные сообщения на части, если превышают лимит Telegram.
+        
+        Args:
+            digest: Объект дайджеста
+            chat_id: ID чата кураторов
+            
+        Returns:
+            bool: Успешность отправки
+        """
+        try:
+            logger.info(f"📤 Отправляем интерактивный дайджест в чат кураторов: {chat_id}")
+            
+            # Создаем интерактивный дайджест с inline кнопками
+            message_text, buttons = self.create_interactive_digest_message(digest)
+            
+            # Проверяем длину сообщения (Telegram лимит: 4096 символов)
+            max_length = 4000  # Оставляем запас для HTML тегов
+            
+            if len(message_text) <= max_length:
+                # Сообщение короткое, отправляем как есть
+                await self._send_single_message(chat_id, message_text, buttons)
+                logger.info(f"✅ Интерактивный дайджест отправлен в чат кураторов (одно сообщение)")
+            else:
+                # Сообщение длинное, разбиваем на части по новостям
+                await self._send_split_messages(chat_id, digest)
+                logger.info(f"✅ Интерактивный дайджест отправлен в чат кураторов (разбит на части по новостям)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки интерактивного дайджеста в чат кураторов: {e}")
+            return False
+
+    async def _send_single_message(self, chat_id: str, message_text: str, buttons: list) -> bool:
+        """
+        Отправляет одно сообщение с inline кнопками.
+        
+        Args:
+            chat_id: ID чата
+            message_text: Текст сообщения
+            buttons: Список кнопок
+            
+        Returns:
+            bool: Успешность отправки
+        """
+        try:
+            from telegram import InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup(buttons)
+            
+            # Очищаем текст от неправильных HTML тегов
+            cleaned_text = self._clean_html_text(message_text)
+            
+            if self.bot:
+                message = await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=cleaned_text,
+                    reply_markup=reply_markup,
+                    parse_mode=None
+                )
+                logger.info(f"✅ Сообщение отправлено через bot")
+                
+                # Сохраняем ID сообщения в сессии для одиночных сообщений
+                if message and message.message_id:
+                    self._save_digest_session(chat_id, [message.message_id], 0)
+                    logger.info(f"💾 Сохранена сессия для одиночного сообщения: {message.message_id}")
+            else:
+                # Fallback через notification service (без кнопок)
+                await self.notification.send_telegram_message(
+                    chat_id=chat_id,
+                    message=message_text,
+                    parse_mode="HTML"
+                )
+                logger.info(f"✅ Сообщение отправлено через notification service (без кнопок)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки одиночного сообщения: {e}")
+            return False
+
+    async def _send_split_messages(self, chat_id: str, digest: MorningDigest) -> bool:
+        """
+        Разбивает дайджест на части по новостям и отправляет их с соответствующими кнопками.
+        
+        Args:
+            chat_id: ID чата
+            digest: Объект дайджеста
+            
+        Returns:
+            bool: Успешность отправки
+        """
+        try:
+            # Разбиваем дайджест на части по новостям
+            parts = self._split_message_by_news(digest)
+            
+            if not parts:
+                logger.error("❌ Не удалось разбить дайджест на части")
+                return False
+            
+            logger.info(f"📤 Отправляем дайджест в {len(parts)} частях")
+            
+            # Список для хранения ID всех сообщений дайджеста
+            message_ids = []
+            
+            # Отправляем каждую часть с соответствующими кнопками
+            for i, part in enumerate(parts):
+                # Создаем кнопки для текущей части
+                part_buttons = []
+                
+                for news_idx in part['buttons']:
+                    news = digest.news_items[news_idx]
+                    if hasattr(news, 'id') and news.id is not None:
+                        button_text = f"🗑️ Удалить {news_idx + 1}"
+                        callback_data = f"remove_news_{news.id}"
+                        from telegram import InlineKeyboardButton
+                        part_buttons.append([
+                            InlineKeyboardButton(button_text, callback_data=callback_data)
+                        ])
+                        logger.info(f"🔘 Создаю кнопку для части {i+1}: {button_text} -> {callback_data}")
+                
+                # Добавляем кнопку "Одобрить оставшиеся" только к последней части
+                if i == len(parts) - 1:
+                    from telegram import InlineKeyboardButton
+                    approve_button = InlineKeyboardButton(
+                        "✅ Одобрить оставшиеся", 
+                        callback_data="approve_remaining"
+                    )
+                    part_buttons.append([approve_button])
+                    logger.info(f"🔘 Добавляю кнопку одобрения к последней части")
+                
+                # Отправляем часть с кнопками
+                if part_buttons:
+                    if self.bot:
+                        from telegram import InlineKeyboardMarkup
+                        # Очищаем текст от неправильных HTML тегов
+                        cleaned_text = self._clean_html_text(part['text'])
+                        message = await self.bot.send_message(
+                            chat_id=chat_id,
+                            text=cleaned_text,
+                            reply_markup=InlineKeyboardMarkup(part_buttons),
+                            parse_mode=None
+                        )
+                        message_ids.append(message.message_id)
+                        logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} с {len(part_buttons)} кнопками")
+                    else:
+                        await self._send_single_message(chat_id, part['text'], part_buttons)
+                else:
+                    # Отправляем без кнопок
+                    if self.bot:
+                        # Очищаем текст от неправильных HTML тегов
+                        cleaned_text = self._clean_html_text(part['text'])
+                        message = await self.bot.send_message(
+                            chat_id=chat_id,
+                            text=cleaned_text,
+                            parse_mode=None
+                        )
+                        message_ids.append(message.message_id)
+                        logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} без кнопок")
+                    else:
+                        await self.notification.send_telegram_message(
+                            chat_id=chat_id,
+                            message=part['text'],
+                            parse_mode="HTML"
+                        )
+            
+            # Сохраняем ID всех сообщений дайджеста в сессии
+            if message_ids:
+                self._save_digest_session(chat_id, message_ids, digest.news_count)
+                logger.info(f"💾 Сохранены ID {len(message_ids)} сообщений дайджеста для чата {chat_id}")
+            
+            # НЕ деактивируем сессию здесь - она остается активной для модерации
+            logger.info(f"✅ Дайджест отправлен, сессия активна для модерации")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки разбитых сообщений: {e}")
+            return False
+
+    def _clean_html_text(self, text: str) -> str:
+        """
+        Очищает текст от HTML тегов и добавляет переносы строк для читаемости.
+        
+        Args:
+            text: Исходный текст
+            
+        Returns:
+            str: Очищенный текст с переносами строк
+        """
+        import re
+        
+        # Удаляем все HTML теги
+        text = re.sub(r'<[^>]*>', '', text)
+        
+        # Добавляем переносы строк для читаемости
+        # После точек, восклицательных и вопросительных знаков
+        text = re.sub(r'([.!?])\s+', r'\1\n\n', text)
+        
+        # После двоеточий
+        text = re.sub(r':\s+', ':\n', text)
+        
+        # После тире
+        text = re.sub(r'—\s+', '—\n', text)
+        
+        # Удаляем множественные переносы строк
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Удаляем множественные пробелы
+        text = re.sub(r'[ \t]+', ' ', text)
+        
+        # Удаляем пробелы в начале и конце строк
+        lines = text.split('\n')
+        lines = [line.strip() for line in lines]
+        text = '\n'.join(lines)
+        
+        # Удаляем пустые строки в начале и конце
+        text = text.strip()
+        
+        return text
+
+    def _escape_markdown(self, text: str) -> str:
+        """
+        Экранирует специальные символы для MarkdownV2.
+        
+        Args:
+            text: Исходный текст
+            
+        Returns:
+            str: Экранированный текст
+        """
+        # Символы, которые нужно экранировать в MarkdownV2
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        
+        return text
+    
+    def _split_message_by_news(self, digest: MorningDigest, max_length: int = 3500) -> list:
+        """
+        Разбивает дайджест на части по новостям, чтобы не разрывать новости посередине.
+        
+        Args:
+            digest: Объект дайджеста
+            max_length: Максимальная длина части
+            
+        Returns:
+            list: Список частей с новостями и кнопками
+        """
+        if not digest.news_items:
+            return []
+        
+        parts = []
+        current_part = ""
+        current_news = []
+        current_buttons = []
+        
+        # Заголовок дайджеста
+        header = f"""
+🌅 УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ
+📅 Дата: {digest.date.strftime('%d.%m.%Y')}
+📰 Всего новостей: {digest.news_count}
+
+📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:
+"""
+        # header = self._escape_markdown(header)  # Отключаем экранирование
+        
+        current_part = header
+        
+        for i, news in enumerate(digest.news_items):
+            # Формируем текст новости
+            post_link = self._generate_post_link(news)
+            news_text = f"""
+{i+1}. {news.title}
+📝 {news.summary}
+➡️ Источник: {post_link}
+
+"""
+            # news_text = self._escape_markdown(news_text)  # Отключаем экранирование
+            
+            # Проверяем, не превысит ли добавление новости лимит
+            if len(current_part + news_text) > max_length and current_part != header:
+                # Сохраняем текущую часть
+                parts.append({
+                    'text': current_part,
+                    'news_indices': current_news,
+                    'buttons': current_buttons
+                })
+                
+                # Начинаем новую часть
+                current_part = news_text
+                current_news = [i]
+                current_buttons = [i]
+            else:
+                # Добавляем новость к текущей части
+                current_part += news_text
+                current_news.append(i)
+                current_buttons.append(i)
+        
+        # Добавляем последнюю часть
+        if current_part:
+            # Проверяем, не слишком ли длинная последняя часть
+            if len(current_part) > max_length:
+                # Разбиваем на более мелкие части
+                logger.warning(f"⚠️ Последняя часть слишком длинная ({len(current_part)} символов), разбиваем...")
+                # Убираем заголовок из последней части для разбиения
+                content_only = current_part.replace(header, "")
+                # Разбиваем по новостям
+                news_parts = content_only.split('\n\n')
+                current_part = header
+                current_news = []
+                current_buttons = []
+                
+                for news_part in news_parts:
+                    if news_part.strip():
+                        if len(current_part + news_part + '\n\n') > max_length:
+                            # Сохраняем текущую часть
+                            parts.append({
+                                'text': current_part,
+                                'news_indices': current_news,
+                                'buttons': current_buttons
+                            })
+                            # Начинаем новую часть
+                            current_part = header + news_part + '\n\n'
+                            current_news = []
+                            current_buttons = []
+                        else:
+                            current_part += news_part + '\n\n'
+                            # Находим индекс новости по номеру
+                            try:
+                                news_num = int(news_part.split('.')[0])
+                                if news_num > 0:
+                                    current_news.append(news_num - 1)
+                                    current_buttons.append(news_num - 1)
+                            except:
+                                pass
+                
+                # Добавляем последнюю часть
+                if current_part and current_part != header:
+                    parts.append({
+                        'text': current_part,
+                        'news_indices': current_news,
+                        'buttons': current_buttons
+                    })
+            else:
+                parts.append({
+                    'text': current_part,
+                    'news_indices': current_news,
+                    'buttons': current_buttons
+                })
+        
+        # Добавляем инструкции к последней части
+        if parts:
+            footer = """
+💡 ИНСТРУКЦИИ:
+• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
+• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
+"""
+            # footer = self._escape_markdown(footer)  # Отключаем экранирование
+            parts[-1]['text'] += footer
+        
+        return parts
+    
+    async def send_digest_to_curators_chat_auto(self, digest: MorningDigest) -> bool:
+        """
+        Автоматически отправляет дайджест в чат кураторов (по ФТ).
+        
+        Args:
+            digest: Объект дайджеста
+            
+        Returns:
+            bool: Успешность отправки
+        """
+        return await self.send_digest_to_curators_chat(digest, self.curators_chat_id)
+    
+    async def send_digest_to_specific_curator(self, digest: MorningDigest, curator_id: str) -> bool:
+        """
+        Отправляет дайджест конкретному куратору.
+        
+        Args:
+            digest: Объект дайджеста
+            curator_id: ID куратора
+            
+        Returns:
+            bool: Успешность отправки
+        """
+        try:
+            logger.info(f"📤 Отправляем дайджест куратору {curator_id}...")
+            
+            # Получаем куратора
+            curator = await self.curator_service.get_curator_by_id(curator_id)
+            
+            if not curator:
+                logger.error(f"❌ Куратор {curator_id} не найден")
+                return False
+            
+            # Создаем интерактивный дайджест с inline кнопками
+            message_text, buttons = self.create_interactive_digest_message(digest)
+            
+            # Создаем InlineKeyboardMarkup
+            from telegram import InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup(buttons)
+            
+            # Отправляем через bot или notification service
+            if self.bot:
+                await self.bot.send_message(
+                    chat_id=curator.telegram_id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+                logger.info(f"✅ Интерактивный дайджест отправлен куратору {curator.name} через bot")
+            else:
+                await self.notification.send_telegram_message(
+                    chat_id=curator.telegram_id,
+                    message=message_text,
+                    parse_mode="HTML"
+                )
+                logger.info(f"✅ Дайджест отправлен куратору {curator.name} через notification service (без кнопок)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки дайджеста куратору {curator_id}: {e}")
+            return False
+    
+    def _create_empty_digest(self) -> MorningDigest:
+        """Создает пустой дайджест."""
+        return MorningDigest(
+            date=datetime.now(),
+            news_count=0,
+            news_items=[],
+            total_importance=0,
+            categories=[],
+            curator_id=None
+        )
+    
+    async def get_digest_statistics(self) -> Dict[str, Any]:
+        """
+        Получает статистику по дайджестам.
+        
+        Returns:
+            Dict: Статистика дайджестов
+        """
+        try:
+            # Получаем новости за разные периоды
+            last_24h = await self._get_recent_news(hours=24)
+            last_7d = await self._get_recent_news(hours=24*7)
+            last_30d = await self._get_recent_news(hours=24*30)
+            
+            # Собираем статистику
+            stats = {
+                "last_24h": {
+                    "count": len(last_24h),
+                    "avg_importance": sum(n.importance_score or 5 for n in last_24h) / len(last_24h) if last_24h else 0
+                },
+                "last_7d": {
+                    "count": len(last_7d),
+                    "avg_importance": sum(n.importance_score or 5 for n in last_7d) / len(last_7d) if last_7d else 0
+                },
+                "last_30d": {
+                    "count": len(last_30d),
+                    "avg_importance": sum(n.importance_score or 5 for n in last_30d) / len(last_30d) if last_30d else 0
+                }
+            }
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            return {}
+
+    def create_interactive_digest_message(self, digest: MorningDigest) -> tuple[str, list]:
+        """
+        Создает интерактивное сообщение с дайджестом и inline кнопками.
+        
+        Args:
+            digest: Дайджест для отображения
+            
+        Returns:
+            tuple: (текст сообщения, список inline кнопок)
+        """
+        if not digest.news_items:
+            return "📭 <b>Новостей для модерации не найдено</b>", []
+        
+        # Заголовок дайджеста
+        header = f"""
+🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
+📅 Дата: {digest.date.strftime('%d.%m.%Y')}
+📰 Всего новостей: {digest.news_count}
+
+<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
+"""
+        
+        # Список новостей
+        news_list = ""
+        for i, news in enumerate(digest.news_items, 1):
+            post_link = self._generate_post_link(news)
+            news_list += f"""
+<b>{i}. {news.title}</b>
+📝 {news.summary}
+➡️ <a href="{post_link}">Источник</a>
+
+"""
+        
+        # Инструкции
+        footer = """
+<b>💡 ИНСТРУКЦИИ:</b>
+• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
+• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
+"""
+        
+        message_text = header + news_list + footer
+        
+        # Создаем inline кнопки для каждой новости
+        buttons = []
+        logger.info(f"🔘 Начинаем создание кнопок для {len(digest.news_items)} новостей")
+        
+        for i, news in enumerate(digest.news_items):
+            # Логируем информацию о новости для отладки
+            logger.info(f"🔘 Обрабатываем новость {i+1}: ID={getattr(news, 'id', 'None')}, Title='{getattr(news, 'title', 'None')[:30]}...'")
+            
+            # Проверяем, что у новости есть ID
+            if not hasattr(news, 'id') or news.id is None:
+                logger.warning(f"⚠️ У новости {i+1} отсутствует ID, пропускаем кнопку")
+                continue
+                
+            button_text = f"🗑️ Удалить {i+1}"
+            callback_data = f"remove_news_{news.id}"
+            logger.info(f"🔘 Создаю кнопку: {button_text} -> {callback_data}")
+            buttons.append([
+                InlineKeyboardButton(
+                    button_text, 
+                    callback_data=callback_data
+                )
+            ])
+        
+        # Кнопка для одобрения оставшихся новостей
+        approve_button = InlineKeyboardButton(
+            "✅ Одобрить оставшиеся", 
+            callback_data="approve_remaining"
+        )
+        logger.info(f"🔘 Создаю кнопку одобрения: approve_remaining")
+        buttons.append([approve_button])
+        
+        logger.info(f"🔘 Всего создано кнопок: {len(buttons)}")
+        return message_text, buttons
+
+    def _save_digest_session(self, chat_id: str, message_ids: List[int], news_count: int):
+        """
+        Сохраняет информацию о сессии дайджеста в JSON файл (временное решение).
+        
+        Args:
+            chat_id: ID чата
+            message_ids: Список ID сообщений дайджеста
+            news_count: Количество новостей в дайджесте
+        """
+        try:
+            logger.info(f"💾 Сохраняем сессию дайджеста для чата: {chat_id} (тип: {type(chat_id)})")
+            logger.info(f"💾 ID сообщений: {message_ids}")
+            
+            # Временное решение: сохраняем в JSON файл
+            import os
+            import json
+            
+            # Создаем папку для сессий, если её нет
+            sessions_dir = "digest_sessions"
+            if not os.path.exists(sessions_dir):
+                os.makedirs(sessions_dir)
+            
+            # Файл для сессии
+            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
+            
+            # Данные сессии
+            session_data = {
+                'chat_id': chat_id,
+                'message_ids': message_ids,
+                'news_count': news_count,
+                'created_at': datetime.now().isoformat(),
+                'is_active': True
+            }
+            
+            # Сохраняем в файл
+            with open(session_file, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"💾 Сохранена сессия дайджеста для чата {chat_id}: {len(message_ids)} сообщений, {news_count} новостей")
+            
+            # Логируем все активные сессии для отладки
+            active_sessions = []
+            if os.path.exists(sessions_dir):
+                for filename in os.listdir(sessions_dir):
+                    if filename.startswith("session_") and filename.endswith(".json"):
+                        try:
+                            with open(os.path.join(sessions_dir, filename), 'r', encoding='utf-8') as f:
+                                session = json.load(f)
+                                if session.get('is_active', False):
+                                    active_sessions.append(session['chat_id'])
+                        except Exception as e:
+                            logger.warning(f"⚠️ Ошибка чтения файла сессии {filename}: {e}")
+            
+            logger.info(f"💾 Все активные сессии: {active_sessions}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения сессии дайджеста: {e}")
+    
+    def get_digest_session(self, chat_id: str) -> Optional[Dict]:
+        """
+        Получает информацию о сессии дайджеста из JSON файла (временное решение).
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            Dict: Информация о сессии или None
+        """
+        try:
+            # Добавляем логирование для отладки
+            logger.info(f"🔍 Ищем сессию дайджеста для чата: {chat_id}")
+            
+            # Временное решение: читаем из JSON файла
+            import os
+            import json
+            
+            sessions_dir = "digest_sessions"
+            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
+            
+            if os.path.exists(session_file):
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                
+                if session_data.get('is_active', False):
+                    # Конвертируем строку времени обратно в datetime
+                    created_at_str = session_data.get('created_at')
+                    if created_at_str:
+                        try:
+                            created_at = datetime.fromisoformat(created_at_str)
+                            session_data['created_at'] = created_at
+                        except ValueError:
+                            session_data['created_at'] = datetime.now()
+                    
+                    logger.info(f"✅ Сессия найдена: {len(session_data.get('message_ids', []))} сообщений")
+                    return session_data
+                else:
+                    logger.warning(f"⚠️ Сессия для чата {chat_id} неактивна")
+                    return None
+            else:
+                logger.warning(f"⚠️ Файл сессии не найден для чата {chat_id}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сессии дайджеста: {e}")
+            return None
+    
+    def clear_digest_session(self, chat_id: str):
+        """
+        Деактивирует сессию дайджеста для указанного чата в JSON файле (временное решение).
+        
+        Args:
+            chat_id: ID чата
+        """
+        try:
+            import os
+            import json
+            
+            sessions_dir = "digest_sessions"
+            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
+            
+            if os.path.exists(session_file):
+                # Читаем текущую сессию
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                
+                # Деактивируем сессию
+                session_data['is_active'] = False
+                session_data['deactivated_at'] = datetime.now().isoformat()
+                
+                # Сохраняем обновленную сессию
+                with open(session_file, 'w', encoding='utf-8') as f:
+                    json.dump(session_data, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"🗑️ Деактивирована сессия дайджеста для чата {chat_id}")
+            else:
+                logger.warning(f"⚠️ Файл сессии не найден для чата {chat_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка деактивации сессии дайджеста: {e}")
+    
+    async def delete_digest_messages(self, chat_id: str) -> bool:
+        """
+        Удаляет все сообщения дайджеста для указанного чата.
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            bool: Успешность удаления
+        """
+        try:
+            logger.info(f"🗑️ Начинаем ПРОСТУЮ очистку всех сообщений дайджеста для чата: {chat_id}")
+            
+            if not self.bot:
+                logger.warning(f"⚠️ Бот недоступен для чата {chat_id}")
+                return False
+            
+            # ПРОСТОЕ решение: удаляем сообщения из текущей сессии
+            total_deleted = await self._delete_all_digest_messages_in_chat(chat_id)
+            
+            # НЕ очищаем сессию здесь - это делается в другом месте
+            # self.clear_digest_session(chat_id)  # УБРАНО!
+            
+            logger.info(f"✅ ПРОСТАЯ очистка завершена, удалено {total_deleted} сообщений")
+            return total_deleted > 0
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка простой очистки: {e}")
+            return False
+    
+    async def _delete_message_by_content(self, chat_id: str, message_id: int) -> bool:
+        """
+        Удаляет сообщение по содержимому, если не удалось по ID.
+        
+        Args:
+            chat_id: ID чата
+            message_id: ID сообщения
+            
+        Returns:
+            bool: Успешность удаления
+        """
+        try:
+            # Получаем последние сообщения и ищем дайджест
+            messages = await self.bot.get_chat_history(chat_id, limit=50)
+            
+            for msg in messages:
+                if (msg.message_id == message_id and 
+                    any(keyword in msg.text for keyword in ["УТРЕННИЙ ДАЙДЖЕСТ", "НОВОСТИ ДЛЯ МОДЕРАЦИИ", "🗑️ Удалить"])):
+                    try:
+                        await self.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                        logger.info(f"🗑️ Удалено сообщение дайджеста по содержимому: {msg.message_id}")
+                        return True
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось удалить сообщение {msg.message_id}: {e}")
+                        return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления сообщения по содержимому: {e}")
+            return False
+
+    async def _delete_all_digest_messages_in_chat(self, chat_id: str) -> int:
+        """
+        Удаляет ВСЕ сообщения дайджеста в чате, используя ПРОСТОЙ подход.
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            int: Количество удаленных сообщений
+        """
+        try:
+            if not self.bot:
+                logger.warning(f"⚠️ Бот недоступен для чата {chat_id}")
+                return 0
+            
+            logger.info(f"🗑️ Начинаем ПРОСТУЮ очистку всех сообщений дайджеста в чате {chat_id}")
+            
+            # Получаем информацию о чате (best-effort)
+            try:
+                chat_info = await self.bot.get_chat(chat_id)
+                logger.info(f"🔍 Получена информация о чате: {chat_info.title if hasattr(chat_info, 'title') else chat_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось получить информацию о чате: {e}")
+            
+            deleted_count = 0
+            session = self.get_digest_session(chat_id)
+            if session and session.get('message_ids'):
+                logger.info(f"🔍 Удаляем сообщения из текущей сессии: {session['message_ids']}")
+                for msg_id in session['message_ids']:
+                    try:
+                        await self.bot.delete_message(
+                            chat_id=int(chat_id), 
+                            message_id=int(msg_id)
+                        )
+                        deleted_count += 1
+                        logger.info(f"🗑️ Удалено сообщение сессии: {msg_id}")
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось удалить сообщение сессии {msg_id}: {e}")
+                        continue
+            else:
+                logger.warning(f"⚠️ Сообщения сессии для удаления не найдены (session missing or inactive)")
+            
+            logger.info(f"✅ ПРОСТАЯ очистка завершена, удалено {deleted_count} сообщений")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка простой очистки: {e}")
+            return 0
+
+
+
+# Пример использования
+if __name__ == "__main__":
+    print("🌅 Morning Digest Service - Тест")
+    print("=" * 40)
+    
+    # Создаем mock сервисы для тестирования
+    from unittest.mock import Mock
+    
+    mock_db = Mock()
+    mock_ai = Mock()
+    mock_notification = Mock()
+    mock_curator = Mock()
+    
+    # Создаем сервис
+    service = MorningDigestService(
+        database_service=mock_db,
+        ai_analysis_service=mock_ai,
+        notification_service=mock_notification,
+        curator_service=mock_curator
+    )
+    
+    print("✅ MorningDigestService создан успешно")
+    print("📋 Функции:")
+    print("   - create_morning_digest()")
+    print("   - format_digest_for_telegram()")
+    print("   - send_digest_to_curators()")
+    print("   - send_digest_to_specific_curator()")
+    print("   - get_digest_statistics()")
