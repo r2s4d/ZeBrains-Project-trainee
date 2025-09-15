@@ -11,25 +11,9 @@ from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass
 from openai import OpenAI
+from src.config import config
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class NewsAnalysis:
-    """Результат анализа новости."""
-    title: str
-    content: str
-    summary: str
-    importance_score: int
-    category: str
-    is_duplicate: bool
-    source_links: str = ""
-    tags: list = None
-    analyzed_at: datetime = None
-    
-    def __post_init__(self):
-        if self.tags is None:
-            self.tags = ["ИИ", "Технологии"]
 
 class AIAnalysisService:
     """
@@ -40,8 +24,8 @@ class AIAnalysisService:
     def __init__(self):
         """Инициализация AI сервиса."""
         # Проверяем доступность ProxyAPI
-        self.proxy_url = os.getenv('PROXY_API_URL')
-        self.proxy_api_key = os.getenv('PROXY_API_KEY')
+        self.proxy_url = config.ai.proxy_url
+        self.proxy_api_key = config.ai.proxy_api_key
         
         if self.proxy_url and self.proxy_api_key:
             logger.info("🚀 Используем ProxyAPI для AI анализа")
@@ -67,7 +51,7 @@ class AIAnalysisService:
                     available_models = [model.id for model in models_response.data]
                     logger.info(f"📋 Доступные модели: {available_models}")
                     
-                    preferred_model = "openai/gpt-5-mini-2025-08-07"
+                    preferred_model = config.ai.model
                     if preferred_model in available_models:
                         logger.info(f"✅ Модель {preferred_model} доступна")
                     else:
@@ -80,151 +64,9 @@ class AIAnalysisService:
                 logger.error(f"❌ Ошибка инициализации OpenAI клиента: {e}")
                 self.client = None
         
-        # Упрощенный промпт для саммари и анализа
-        self.unified_prompt = """
-        Проанализируй следующую новость из мира ИИ для ZeBrains и создай краткое саммари:
-
-        ЗАГОЛОВОК: {title}
-        СОДЕРЖАНИЕ: {content}
-
-        ТРЕБОВАНИЯ:
-
-        САММАРИ:
-        - Объем: 1-3 предложения (50-100 слов)
-        - Содержание: Только ключевые факты, без лишних деталей
-        - Фокус: На технологическом аспекте и практическом применении
-
-        АНАЛИЗ:
-        - Дубликат: Да/Нет (является ли эта новость дубликатом)
-        - Ссылки: Указание ссылок на оригинальные посты (не каналы!)
-
-        ФОРМАТ ОТВЕТА:
-        САММАРИ: [краткое саммари в 1-3 предложения, 50-100 слов]
-        ДУБЛИКАТ: [Да/Нет]
-        ССЫЛКИ: [ссылки на оригинальные посты]
-
-        ПРИМЕР ХОРОШЕГО САММАРИ:
-        OpenAI представила GPT-4 Turbo с улучшенными возможностями обработки изображений и текста. Это важный шаг для развития мультимодальных ИИ-систем, который может значительно улучшить качество автоматического анализа документов и визуального контента.
-
-        ВАЖНО: Отвечай строго по формату, без дополнительных пояснений.
-        """
         
         logger.info("✅ AIAnalysisService инициализирован")
     
-    async def analyze_news(self, title: str, content: str, source_links: str = "") -> NewsAnalysis:
-        """
-        Анализирует новость и возвращает структурированный анализ с саммари.
-        
-        Args:
-            title: Заголовок новости
-            content: Содержание новости
-            source_links: Ссылки на источники
-            
-        Returns:
-            NewsAnalysis: Результат анализа
-        """
-        try:
-            logger.info(f"🔍 Анализируем новость: {title[:50]}...")
-            
-            # Используем ProxyAPI для анализа
-            if self.use_proxy and self.client:
-                logger.info("🚀 Используем ProxyAPI для анализа")
-                
-                # Формируем промпт для анализа
-                prompt = self.unified_prompt.format(
-                    title=title,
-                    content=content[:1000]  # Ограничиваем длину для API
-                )
-                
-                # Вызываем OpenAI API через прокси
-                try:
-                    # Пробуем разные модели
-                    models_to_try = ["openai/gpt-5-mini-2025-08-07", "gpt-4", "gpt-3.5-turbo"]
-                    response = None
-                    
-                    for model in models_to_try:
-                        try:
-                            logger.info(f"🤖 Пробуем модель: {model}")
-                            response = self.client.chat.completions.create(
-                                model=model,
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            logger.info(f"✅ Успешно использована модель: {model}")
-                            break
-                        except Exception as model_error:
-                            logger.warning(f"⚠️ Модель {model} не работает: {model_error}")
-                            continue
-                    
-                    if not response:
-                        raise Exception("Ни одна из моделей не работает")
-                    
-                    # Парсим ответ
-                    analysis = self._parse_unified_response(response.choices[0].message.content, title, content, source_links)
-                    
-                    logger.info(f"✅ Анализ завершен: дубликат {analysis.is_duplicate}")
-                    return analysis
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка ProxyAPI: {e}")
-                    logger.error(f"❌ Тип ошибки: {type(e).__name__}")
-                    logger.error(f"❌ Детали: {str(e)}")
-                    logger.warning("⚠️ Переходим к fallback анализу")
-            
-            # Fallback: создаем базовый анализ
-            logger.warning("⚠️ ProxyAPI недоступен, используем базовый анализ")
-            return self._create_fallback_analysis(title, content, source_links)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка анализа новости: {e}")
-            # Возвращаем базовый анализ в случае ошибки
-            return self._create_fallback_analysis(title, content, source_links)
-    
-
-    
-    def _parse_unified_response(self, response: str, title: str, content: str, source_links: str) -> NewsAnalysis:
-        """Парсит объединенный ответ от OpenAI."""
-        try:
-            lines = response.split('\n')
-            analysis = NewsAnalysis(
-                title=title,
-                content=content,
-                summary="",
-                importance_score=5,  # Базовый балл по умолчанию
-                category="Искусственный интеллект",  # Базовая категория по умолчанию
-                is_duplicate=False,
-                source_links=source_links,
-                tags=["ИИ", "Технологии"],
-                analyzed_at=datetime.now()
-            )
-            
-            for line in lines:
-                line = line.strip()
-                if line.startswith("САММАРИ:"):
-                    analysis.summary = line.replace("САММАРИ:", "").strip()
-                elif line.startswith("ДУБЛИКАТ:"):
-                    analysis.is_duplicate = line.split(":")[1].strip().lower() == "да"
-                elif line.startswith("ССЫЛКИ:"):
-                    analysis.source_links = line.split(":")[1].strip()
-            
-            return analysis
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга ответа: {e}")
-            return self._create_fallback_analysis(title, content, source_links)
-    
-    def _create_fallback_analysis(self, title: str, content: str, source_links: str) -> NewsAnalysis:
-        """Создает базовый анализ в случае ошибки."""
-        return NewsAnalysis(
-            title=title,
-            content=content,
-            summary=f"Краткое саммари: {title}",
-            importance_score=5,  # Базовый балл по умолчанию
-            category="Искусственный интеллект",  # Базовая категория по умолчанию
-            is_duplicate=False,
-            source_links=source_links,
-            tags=["ИИ", "Технологии"],
-            analyzed_at=datetime.now()
-        )
     
     async def generate_summary_only(self, title: str, content: str) -> str:
         """
@@ -261,7 +103,7 @@ class AIAnalysisService:
                 # Вызываем OpenAI API через прокси
                 try:
                     response = self.client.chat.completions.create(
-                        model="openai/gpt-5-mini-2025-08-07",
+                        model=config.ai.model,
                         messages=[{"role": "user", "content": summary_prompt}]
                     )
                     
@@ -299,7 +141,7 @@ class AIAnalysisService:
                 try:
                     # Синхронный вызов к ProxyAPI
                     response = self.client.chat.completions.create(
-                        model="openai/gpt-5-mini-2025-08-07",
+                        model=config.ai.model,
                         messages=[
                             {"role": "system", "content": "Ты - профессиональный SMM-менеджер, создающий качественный контент для дайджестов новостей об ИИ."},
                             {"role": "user", "content": prompt}
@@ -400,7 +242,7 @@ class AIAnalysisService:
             # Используем существующую логику AI запросов
             try:
                 # Пробуем разные модели
-                models_to_try = ["openai/gpt-5-mini-2025-08-07", "gpt-4", "gpt-3.5-turbo"]
+                models_to_try = [config.ai.model, "gpt-4", "gpt-3.5-turbo"]
                 response = None
                 
                 for model in models_to_try:

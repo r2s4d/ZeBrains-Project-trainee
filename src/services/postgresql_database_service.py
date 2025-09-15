@@ -3,13 +3,12 @@
 Заменит mock DatabaseService на реальные SQL запросы.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import logging
 
-from src.models.database import Source, News, Curator, Expert
+from src.models.database import Source, News, Expert, Comment, NewsSource
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -21,6 +20,8 @@ class PostgreSQLDatabaseService:
         """Инициализация сервиса."""
         self.engine = None
         self.SessionLocal = None
+        # Временное хранение выбранного эксперта недели
+        self.selected_expert_id = None
         self._initialize_connection()
     
     def _initialize_connection(self):
@@ -54,47 +55,9 @@ class PostgreSQLDatabaseService:
             raise Exception("PostgreSQL не инициализирован")
         return self.SessionLocal()
     
-    def test_connection(self) -> bool:
-        """Тестирует подключение к базе данных."""
-        try:
-            with self.get_session() as db:
-                from sqlalchemy import text
-                db.execute(text("SELECT 1"))
-                logger.info("✅ Подключение к PostgreSQL работает")
-                return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
-            return False
     
     # ===== РАБОТА С ИСТОЧНИКАМИ (Sources) =====
     
-    def add_source(self, name: str, telegram_id: str) -> Optional[Source]:
-        """
-        Добавляет новый источник новостей.
-        
-        Args:
-            name: Название источника
-            telegram_id: Telegram ID источника
-            
-        Returns:
-            Source: Созданный источник или None при ошибке
-        """
-        with self.get_session() as db:
-            try:
-                source = Source(name=name, telegram_id=telegram_id)
-                db.add(source)
-                db.commit()
-                db.refresh(source)
-                logger.info(f"✅ Источник '{name}' добавлен с ID {source.id}")
-                return source
-            except IntegrityError:
-                db.rollback()
-                logger.error(f"❌ Источник с telegram_id '{telegram_id}' уже существует!")
-                return None
-            except Exception as e:
-                db.rollback()
-                logger.error(f"❌ Ошибка при добавлении источника: {e}")
-                return None
     
     def get_all_sources(self) -> List[Source]:
         """
@@ -112,27 +75,6 @@ class PostgreSQLDatabaseService:
                 logger.error(f"❌ Ошибка при получении источников: {e}")
                 return []
     
-    def get_source_by_telegram_id(self, telegram_id: str) -> Optional[Source]:
-        """
-        Получает источник по Telegram ID.
-        
-        Args:
-            telegram_id: Telegram ID источника
-            
-        Returns:
-            Source: Найденный источник или None
-        """
-        with self.get_session() as db:
-            try:
-                source = db.query(Source).filter_by(telegram_id=telegram_id).first()
-                if source:
-                    logger.info(f"🔍 Найден источник: {source.name}")
-                else:
-                    logger.warning(f"⚠️ Источник с telegram_id '{telegram_id}' не найден")
-                return source
-            except Exception as e:
-                logger.error(f"❌ Ошибка при поиске источника: {e}")
-                return None
     
     # ===== РАБОТА С НОВОСТЯМИ (News) =====
     
@@ -152,176 +94,10 @@ class PostgreSQLDatabaseService:
                 logger.error(f"❌ Ошибка при получении всех новостей: {e}")
                 return []
     
-    def get_news_by_id(self, news_id: int) -> Optional[News]:
-        """
-        Получает новость по ID.
-        
-        Args:
-            news_id: ID новости
-            
-        Returns:
-            News: Найденная новость или None
-        """
-        with self.get_session() as db:
-            try:
-                news = db.query(News).filter_by(id=news_id).first()
-                return news
-            except Exception as e:
-                logger.error(f"❌ Ошибка при поиске новости по ID: {e}")
-                return None
     
-    def get_news_by_status(self, status: str) -> List[News]:
-        """
-        Получает новости по статусу.
-        
-        Args:
-            status: Статус новости ('new', 'processed', 'approved', 'rejected')
-            
-        Returns:
-            List[News]: Список новостей с указанным статусом
-        """
-        with self.get_session() as db:
-            try:
-                news_list = db.query(News).filter_by(status=status).all()
-                logger.info(f"📊 Получено {len(news_list)} новостей со статусом '{status}'")
-                return news_list
-            except Exception as e:
-                logger.error(f"❌ Ошибка при получении новостей: {e}")
-                return []
     
-    def update_news_status(self, news_id: int, new_status: str, curator_id: str = None) -> bool:
-        """
-        Обновляет статус новости.
-        
-        Args:
-            news_id: ID новости
-            new_status: Новый статус
-            curator_id: ID куратора (опционально)
-            
-        Returns:
-            bool: True если обновление успешно
-        """
-        with self.get_session() as db:
-            try:
-                news = db.query(News).filter_by(id=news_id).first()
-                if news:
-                    news.status = new_status
-                    if curator_id:
-                        news.curator_id = curator_id
-                        news.curated_at = datetime.utcnow()
-                    db.commit()
-                    logger.info(f"✅ Статус новости {news_id} обновлен на '{new_status}'")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Новость с ID {news_id} не найдена")
-                    return False
-            except Exception as e:
-                db.rollback()
-                logger.error(f"❌ Ошибка обновления статуса новости: {e}")
-                return False
     
-    # ===== РАБОТА С КУРАТОРАМИ (Curators) =====
     
-    def get_all_curators(self) -> List[Curator]:
-        """
-        Получает всех кураторов.
-        
-        Returns:
-            List[Curator]: Список всех кураторов
-        """
-        with self.get_session() as db:
-            try:
-                curators = db.query(Curator).filter_by(is_active=True).all()
-                logger.info(f"📊 Получено {len(curators)} активных кураторов")
-                return curators
-            except Exception as e:
-                logger.error(f"❌ Ошибка при получении кураторов: {e}")
-                return []
-    
-    def get_curator_by_id(self, curator_id: int) -> Optional[Curator]:
-        """
-        Получает куратора по ID.
-        
-        Args:
-            curator_id: ID куратора
-            
-        Returns:
-            Curator: Найденный куратор или None
-        """
-        with self.get_session() as db:
-            try:
-                curator = db.query(Curator).filter_by(id=curator_id).first()
-                return curator
-            except Exception as e:
-                logger.error(f"❌ Ошибка при поиске куратора по ID: {e}")
-                return None
-    
-    # ===== РАБОТА С ЭКСПЕРТАМИ (Experts) =====
-    
-    def get_all_experts(self) -> List[Expert]:
-        """
-        Получает всех экспертов.
-        
-        Returns:
-            List[Expert]: Список всех экспертов
-        """
-        with self.get_session() as db:
-            try:
-                experts = db.query(Expert).filter_by(is_active=True).all()
-                logger.info(f"📊 Получено {len(experts)} активных экспертов")
-                return experts
-            except Exception as e:
-                logger.error(f"❌ Ошибка при получении экспертов: {e}")
-                return []
-    
-    def get_expert_by_id(self, expert_id: int) -> Optional[Expert]:
-        """
-        Получает эксперта по ID.
-        
-        Args:
-            expert_id: ID эксперта
-            
-        Returns:
-            Expert: Найденный эксперт или None
-        """
-        with self.get_session() as db:
-            try:
-                expert = db.query(Expert).filter_by(id=expert_id).first()
-                return expert
-            except Exception as e:
-                logger.error(f"❌ Ошибка при поиске эксперта по ID: {e}")
-                return None
-    
-    # ===== СТАТИСТИКА =====
-    
-    def get_database_stats(self) -> dict:
-        """
-        Получает статистику базы данных.
-        
-        Returns:
-            dict: Словарь со статистикой
-        """
-        try:
-            with self.get_session() as db:
-                stats = {
-                    'sources': db.query(Source).count(),
-                    'news': db.query(News).count(),
-                    'curators': db.query(Curator).filter_by(is_active=True).count(),
-                    'experts': db.query(Expert).filter_by(is_active=True).count()
-                }
-                
-                # Статистика по статусам новостей
-                status_stats = {}
-                for status in ['new', 'processed', 'approved', 'rejected']:
-                    status_stats[status] = db.query(News).filter_by(status=status).count()
-                stats['news_by_status'] = status_stats
-                
-                logger.info(f"📊 Статистика БД получена: {stats}")
-                return stats
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при получении статистики: {e}")
-            return {}
 
     async def get_news_since(self, start_time: datetime) -> List[News]:
         """Получить новости, опубликованные после указанного времени."""
@@ -333,3 +109,207 @@ class PostgreSQLDatabaseService:
         except Exception as e:
             logger.error(f"❌ Ошибка получения новостей с {start_time}: {e}")
             return []
+    
+    # ===== МЕТОДЫ ДЛЯ ФИНАЛЬНОГО ДАЙДЖЕСТА =====
+    
+    def get_approved_news_for_digest(self, limit: int = 5) -> List[News]:
+        """
+        Получить одобренные новости для создания дайджеста.
+        
+        Args:
+            limit: Максимальное количество новостей
+            
+        Returns:
+            List[News]: Список одобренных новостей
+        """
+        try:
+            with self.get_session() as session:
+                # Получаем одобренные новости, отсортированные по дате
+                news_list = session.query(News).filter(
+                    News.status == "approved"
+                ).order_by(News.created_at.desc()).limit(limit).all()
+                
+                logger.info(f"📊 Получено {len(news_list)} одобренных новостей для дайджеста")
+                return news_list
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения одобренных новостей: {e}")
+            return []
+    
+    def get_expert_of_week(self) -> Optional[Expert]:
+        """
+        Получить эксперта недели.
+        
+        Returns:
+            Expert: Эксперт недели или None
+        """
+        try:
+            with self.get_session() as session:
+                # Если есть выбранный эксперт в памяти, возвращаем его
+                if self.selected_expert_id:
+                    expert = session.query(Expert).filter(Expert.id == self.selected_expert_id).first()
+                    if expert:
+                        logger.info(f"👤 Возвращаем выбранного эксперта недели: {expert.name}")
+                        return expert
+                
+                # Иначе возвращаем первого активного эксперта
+                expert = session.query(Expert).filter(
+                    Expert.is_active == True
+                ).first()
+                
+                if expert:
+                    logger.info(f"👤 Возвращаем первого активного эксперта: {expert.name}")
+                else:
+                    logger.warning("⚠️ Нет активных экспертов")
+                
+                return expert
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения эксперта недели: {e}")
+            return None
+    
+    def set_expert_of_week(self, expert_id: int) -> bool:
+        """
+        Установить эксперта недели.
+        
+        Args:
+            expert_id: ID эксперта
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            with self.get_session() as session:
+                # Проверяем, что эксперт существует
+                expert = session.query(Expert).filter(Expert.id == expert_id).first()
+                if expert:
+                    # Сохраняем выбранного эксперта в памяти
+                    self.selected_expert_id = expert_id
+                    
+                    logger.info(f"✅ Эксперт недели установлен в памяти: {expert.name} (ID: {expert.id})")
+                    return True
+                else:
+                    logger.error(f"❌ Эксперт с ID {expert_id} не найден")
+                    return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки эксперта недели: {e}")
+            return False
+    
+    def get_expert_comments_for_news(self, news_ids: List[int]) -> Dict[int, Dict]:
+        """
+        Получить комментарии экспертов к новостям.
+        
+        Args:
+            news_ids: Список ID новостей
+            
+        Returns:
+            Dict[int, Dict]: Словарь {news_id: comment_data}
+        """
+        try:
+            with self.get_session() as session:
+                # Получаем комментарии к новостям
+                comments = session.query(Comment).filter(
+                    Comment.news_id.in_(news_ids)
+                ).all()
+                
+                # Формируем словарь комментариев
+                comments_dict = {}
+                logger.info(f"🔍 Найдено комментариев: {len(comments)} для новостей: {news_ids}")
+                
+                for comment in comments:
+                    comments_dict[comment.news_id] = {
+                        "text": comment.text,
+                        "expert": {
+                            "name": comment.expert.name if comment.expert else "Неизвестный эксперт",
+                            "specialization": comment.expert.specialization if comment.expert else "AI"
+                        }
+                    }
+                    logger.debug(f"📝 Комментарий для новости {comment.news_id}: {comment.text[:50]}...")
+                
+                logger.info(f"✅ Возвращаем {len(comments_dict)} комментариев")
+                return comments_dict
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения комментариев: {e}")
+            return {}
+    
+    def get_news_sources(self, news_ids: List[int]) -> Dict[int, List[str]]:
+        """
+        Получить источники новостей.
+        
+        Args:
+            news_ids: Список ID новостей
+            
+        Returns:
+            Dict[int, List[str]]: Словарь {news_id: [source_names]}
+        """
+        try:
+            with self.get_session() as session:
+                # Получаем новости с их источниками
+                news_list = session.query(News).filter(
+                    News.id.in_(news_ids)
+                ).all()
+                
+                # Формируем словарь источников
+                sources_dict = {}
+                
+                for news in news_list:
+                    # Получаем источники через связь NewsSource
+                    news_sources = session.query(NewsSource).filter(
+                        NewsSource.news_id == news.id
+                    ).all()
+                    
+                    logger.debug(f"🔍 Новость {news.id}: найдено {len(news_sources)} связей NewsSource")
+                    
+                    if news_sources:
+                        # Получаем уникальные источники (убираем дубликаты)
+                        unique_sources = set()
+                        for ns in news_sources:
+                            source = session.query(Source).filter(Source.id == ns.source_id).first()
+                            if source:
+                                unique_sources.add(source)
+                        
+                        # Создаем одну ссылку на источник (первый уникальный)
+                        if unique_sources:
+                            source = list(unique_sources)[0]  # Берем первый уникальный источник
+                            if source.telegram_id:
+                                # Создаем ссылку на Telegram канал
+                                if source.telegram_id.startswith('@'):
+                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id[1:]})"
+                                else:
+                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id})"
+                            else:
+                                source_link = source.name
+                            sources_dict[news.id] = [source_link]  # Одна ссылка на источник
+                            logger.debug(f"✅ Новость {news.id}: источник {source_link}")
+                        else:
+                            sources_dict[news.id] = ["Неизвестный источник"]
+                            logger.warning(f"❌ Новость {news.id}: нет источников")
+                    else:
+                        # Fallback для тестовых данных - используем разные источники для разных новостей
+                        all_sources = session.query(Source).all()
+                        if all_sources:
+                            # Используем разные источники для разных новостей
+                            source_index = news.id % len(all_sources)
+                            source = all_sources[source_index]
+                            if source.telegram_id:
+                                # Создаем ссылку на Telegram канал
+                                if source.telegram_id.startswith('@'):
+                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id[1:]})"
+                                else:
+                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id})"
+                            else:
+                                source_link = source.name
+                            sources_dict[news.id] = [source_link]  # Одна ссылка на источник
+                            logger.debug(f"⚠️ Новость {news.id}: fallback источник {source_link}")
+                        else:
+                            sources_dict[news.id] = ["Неизвестный источник"]
+                            logger.warning(f"❌ Новость {news.id}: нет источников")
+                
+                logger.info(f"✅ Возвращаем источники для {len(sources_dict)} новостей")
+                return sources_dict
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения источников: {e}")
+            return {}

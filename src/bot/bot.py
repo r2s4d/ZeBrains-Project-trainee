@@ -2,17 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Telegram бот для AI News Assistant.
-Интегрирован с BotDatabaseService и OpenAIService для работы с базой данных и AI.
 """
 
 import os
-import sys
 import logging
 import asyncio
-from typing import List, Optional, Dict
 from datetime import datetime
 
 # Добавляем путь к модулям
+import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,21 +19,17 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from src.services.bot_database_service import BotDatabaseService
-# from src.services.openai_service import OpenAIService  # Удален, используем AIAnalysisService
-from src.services.curator_service import CuratorService
-from src.services.post_formatter_service import PostFormatterService
-from src.services.real_expert_service import RealExpertService
+from src.services.postgresql_database_service import PostgreSQLDatabaseService
 from src.services.news_parser_service import NewsParserService
-from src.services.notification_service import NotificationService
-from src.services.publication_service import PublicationService
 from src.services.interactive_moderation_service import InteractiveModerationService
 from src.services.expert_choice_service import ExpertChoiceService
 from src.services.expert_interaction_service import ExpertInteractionService
-from src.services.morning_digest_service import MorningDigest
+from src.services.morning_digest_service import MorningDigestService
 from src.services.final_digest_formatter_service import FinalDigestFormatterService
 from src.services.curator_approval_service import CuratorApprovalService
-from src.models.database import Source, News, Curator, Expert
+from src.config import config
+from src.services.ai_analysis_service import AIAnalysisService
+from src.services.scheduler_service import SchedulerService
 
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
@@ -52,7 +46,6 @@ logger = logging.getLogger(__name__)
 class AINewsBot:
     """
     Telegram бот для управления AI News Assistant.
-    Интегрирован с BotDatabaseService и OpenAIService для работы с базой данных и AI.
     """
     
     def __init__(self, token: str):
@@ -64,7 +57,7 @@ class AINewsBot:
         """
         self.token = token
         self.application = Application.builder().token(token).build()
-        self.service = BotDatabaseService()
+        self.service = PostgreSQLDatabaseService()
         
         # Состояние ожидания правок дайджеста
         self.waiting_for_digest_edit = {}  # user_id -> True
@@ -73,20 +66,10 @@ class AINewsBot:
         self.waiting_for_photo = {}  # user_id -> digest_text
         
         # OpenAI сервис больше не нужен, используем AIAnalysisService
-        self.ai_service = None
         logger.info("ℹ️ OpenAI сервис отключен, используем AIAnalysisService с ProxyAPI")
         
-        self.curator_service = CuratorService(self.service)
-        self.post_formatter = PostFormatterService()
-        
-        # Инициализируем RealExpertService для работы с реальными экспертами
-        self.expert_service = RealExpertService(self.service)
-        logger.info("✅ RealExpertService подключен для работы с экспертами")
         
         # Инициализируем NewsParserService для автоматического парсинга новостей
-        from src.services.postgresql_database_service import PostgreSQLDatabaseService
-        from src.services.ai_analysis_service import AIAnalysisService
-        
         postgres_db = PostgreSQLDatabaseService()
         
         # Создаем AI сервис для анализа новостей
@@ -100,36 +83,13 @@ class AINewsBot:
         
         self.parser_service = NewsParserService(
             database_service=postgres_db,
-            curator_service=self.curator_service,
-            expert_service=self.expert_service,
-            openai_service=None,  # Больше не используем
             ai_analysis_service=self.ai_analysis_service
         )
         logger.info("✅ NewsParserService подключен для автоматического парсинга с PostgreSQL")
-        
-        # Инициализируем NotificationService для отправки уведомлений
-        self.notification_service = NotificationService(self.service)
-        logger.info("✅ NotificationService подключен для отправки уведомлений")
-        
-        # Инициализируем PublicationService для публикации в канал
-        # Токен берём из переменной окружения, чтобы избежать хардкода
-        bot_token_env = os.getenv('TELEGRAM_BOT_TOKEN')
-        if not bot_token_env:
-            bot_token_env = "8195833718:AAGbqnbZz7NrbOWN5ic5k7oxGMUTntgHE6s"
-        channel_id = "@egor4ik1234"   # ID вашего канала
-        self.publication_service = PublicationService(self.service, bot_token_env, channel_id)
-        logger.info("✅ PublicationService подключен для публикации в канал")
-        
-        
-        
-        
+
         # Инициализируем SchedulerService для автоматических задач
         try:
             logger.info("🔧 Начинаем инициализацию SchedulerService...")
-            
-            from src.services.scheduler_service import SchedulerService
-            from src.services.morning_digest_service import MorningDigestService
-            from src.services.expert_selection_service import ExpertSelectionService
             
             logger.info("✅ Модули SchedulerService импортированы")
             
@@ -142,8 +102,6 @@ class AINewsBot:
             self.morning_digest_service = MorningDigestService(
                 database_service=postgres_db,
                 ai_analysis_service=self.ai_analysis_service,
-                notification_service=self.notification_service,
-                curator_service=self.curator_service,
                 bot=self.application.bot
             )
             logger.info("✅ MorningDigestService создан")
@@ -154,8 +112,8 @@ class AINewsBot:
                 logger.info("✅ FinalDigestFormatterService создан")
                 
                 # Получаем токен бота и ID кураторского чата
-                bot_token = os.getenv('TELEGRAM_BOT_TOKEN', "8195833718:AAGbqnbZz7NrbOWN5ic5k7oxGMUTntgHE6s")
-                curator_chat_id = "-1002983482030"  # ID кураторского чата
+                bot_token = config.telegram.bot_token
+                curator_chat_id = config.telegram.curator_chat_id
                 self.curator_chat_id = curator_chat_id  # Сохраняем как атрибут класса
                 
                 self.curator_approval_service = CuratorApprovalService(
@@ -165,20 +123,19 @@ class AINewsBot:
                     bot_instance=self  # Передаем ссылку на бот
                 )
                 logger.info("✅ CuratorApprovalService создан")
+                
+                # Создаем expert_interaction_service с curator_approval_service
+                self.expert_interaction_service = ExpertInteractionService(
+                    self.application.bot, 
+                    self.curator_approval_service
+                )
+                logger.info("✅ ExpertInteractionService создан с CuratorApprovalService")
             else:
                 logger.warning("⚠️ AIAnalysisService недоступен, финальное форматирование отключено")
                 self.final_digest_formatter = None
                 self.curator_approval_service = None
+                self.expert_interaction_service = None
             
-            self.expert_selection_service = ExpertSelectionService(
-                database_service=postgres_db,
-                notification_service=self.notification_service
-            )
-            logger.info("✅ ExpertSelectionService создан")
-            
-            # Передаем сервисы в MorningDigestService
-            self.morning_digest_service.expert_selection_service = self.expert_selection_service
-            logger.info("✅ ExpertSelectionService подключен к MorningDigestService")
             
             # Передаем NewsParserService для автоматического парсинга
             logger.info("🔧 Создаем SchedulerService...")
@@ -201,16 +158,11 @@ class AINewsBot:
         try:
             self.interactive_moderation_service = InteractiveModerationService()
             self.expert_choice_service = ExpertChoiceService()
-            self.expert_interaction_service = ExpertInteractionService(
-                self.application.bot, 
-                self.curator_approval_service
-            )
             logger.info("✅ Сервисы интерактивной модерации подключены")
         except Exception as e:
             logger.error(f"❌ Ошибка создания сервисов модерации: {e}")
             self.interactive_moderation_service = None
             self.expert_choice_service = None
-            self.expert_interaction_service = None
         
         # Настройка обработчиков
         self._setup_handlers()
@@ -301,47 +253,23 @@ class AINewsBot:
         
         await update.message.reply_text(help_text, parse_mode="HTML")
     
-    
-    
-    
-    
-    
     # ==================== ОБРАБОТКА INLINE КНОПОК ====================
-    
-    async def _safe_answer_callback(self, query, text: str = None):
-        """Безопасно отвечает на callback query с обработкой ошибок."""
-        try:
-            if text:
-                await query.answer(text)
-            else:
-                await query.answer()
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка при ответе на callback query: {e}")
-            # Продолжаем выполнение даже если не удалось ответить
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка нажатий на inline кнопки."""
         query = update.callback_query
         
         # Безопасно отвечаем на callback query с обработкой ошибок
-        await self._safe_answer_callback(query)
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при ответе на callback query: {e}")
+            # Продолжаем выполнение даже если не удалось ответить
         
         data = query.data
         logger.info(f"🔘 Обработка callback: {data}")
         
-        if data == "admin_stats":
-            await self._handle_admin_stats(query)
-        elif data == "admin_sources":
-            await self._handle_admin_sources(query)
-        elif data == "admin_add_source":
-            await self._handle_admin_add_source(query)
-        elif data == "admin_delete_source":
-            await self._handle_admin_delete_source(query)
-        elif data == "admin_ai_test":
-            await self._handle_admin_ai_test(query)
-        elif data == "admin_settings":
-            await self._handle_admin_settings(query)
-        elif data.startswith("remove_news_"):
+        if data.startswith("remove_news_"):
             # Обработка удаления новости
             logger.info(f"🗑️ Удаляем новость с ID: {data}")
             news_id = int(data.split("_")[2])
@@ -380,113 +308,7 @@ class AINewsBot:
             logger.warning(f"❌ Неизвестный callback: {data}")
             await query.edit_message_text("❌ Неизвестная команда")
     
-    async def _handle_admin_stats(self, query):
-        """Обработка кнопки 'Статистика'."""
-        try:
-            stats = self.service.get_statistics()
-            
-            if not stats:
-                await query.edit_message_text("❌ Не удалось получить статистику")
-                return
-            
-            # Проверяем статус OpenAI
-            ai_status = "🟢 Доступен" if self.ai_analysis_service is not None else "🔴 Недоступен"
-            
-            stats_text = f"""
-📊 Статистика системы
 
-📰 Источники: {stats.get('total_sources', 0)}
-📝 Новости: {stats.get('total_news', 0)}
-👥 Кураторы: {stats.get('total_curators', 0)}
-🧠 Эксперты: {stats.get('total_experts', 0)}
-🤖 AI сервис: {ai_status}
-
-🕐 Обновлено: {stats.get('last_update', 'N/A')}
-            """
-            
-            await query.edit_message_text(stats_text)
-            
-        except Exception as e:
-            logger.error(f"Ошибка при получении статистики: {e}")
-            await query.edit_message_text("❌ Ошибка при получении статистики")
-    
-    async def _handle_admin_sources(self, query):
-        """Обработка кнопки 'Источники'."""
-        try:
-            sources = self.service.get_all_sources()
-            
-            if not sources:
-                await query.edit_message_text("📝 Источники не найдены")
-                return
-            
-            sources_text = "📰 Источники новостей:\n\n"
-            
-            for i, source in enumerate(sources[:10], 1):  # Показываем первые 10
-                sources_text += f"{i}. {source.name} ({source.telegram_id})\n"
-            
-            if len(sources) > 10:
-                sources_text += f"\n... и еще {len(sources) - 10} источников"
-            
-            await query.edit_message_text(sources_text)
-            
-        except Exception as e:
-            logger.error(f"Ошибка при получении источников: {e}")
-            await query.edit_message_text("❌ Ошибка при получении источников")
-    
-    async def _handle_admin_add_source(self, query):
-        """Обработка кнопки 'Добавить источник'."""
-        await query.edit_message_text(
-            "➕ Добавление источника\n\n"
-            "Используйте команду:\n"
-            "/add_source <название> <telegram_id>\n\n"
-            "Пример:\n"
-            "/add_source \"AI News\" @ai_news_channel"
-        )
-    
-    async def _handle_admin_delete_source(self, query):
-        """Обработка кнопки 'Удалить источник'."""
-        await query.edit_message_text(
-            "🗑️ Удаление источника\n\n"
-            "Используйте команду:\n"
-            "/delete_source <id>\n\n"
-            "Сначала посмотрите список источников командой /list_sources"
-        )
-    
-    async def _handle_admin_ai_test(self, query):
-        """Обработка кнопки 'AI Тест'."""
-        try:
-            # Тестируем AI сервис
-            test_content = "OpenAI представила новую версию GPT-4"
-            summary = self.ai_analysis_service.generate_summary_only(test_content)
-            
-            if summary:
-                result_text = f"""
-🤖 Тест AI сервиса
-
-✅ **Саммари сгенерировано:**
-{summary[:100]}...
-
-🟢 AI сервис работает корректно
-                """
-            else:
-                result_text = "❌ AI сервис недоступен"
-            
-            await query.edit_message_text(result_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Ошибка при тестировании AI: {e}")
-            await query.edit_message_text("❌ Ошибка при тестировании AI")
-    
-    async def _handle_admin_settings(self, query):
-        """Обработка кнопки 'Настройки'."""
-        await query.edit_message_text(
-            "⚙️ Настройки системы\n\n"
-            "Функция в разработке...\n"
-            "Скоро здесь будут настройки бота"
-        )
-    
-    
-    
     # ==================== КОМАНДА УТРЕННЕГО ДАЙДЖЕСТА ====================
     
     async def morning_digest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -506,19 +328,13 @@ class AINewsBot:
             # Убираем лишнее сообщение - дайджест создается автоматически
             
             # Создаем MorningDigestService
-            from src.services.morning_digest_service import MorningDigestService
-            
             # Получаем необходимые сервисы
             postgres_db = self._get_postgres_db()
-            notification_service = self._get_notification_service()
-            curator_service = self._get_curator_service()
             
             # Создаем сервис дайджеста
             digest_service = MorningDigestService(
                 database_service=postgres_db,
                 ai_analysis_service=self.ai_analysis_service,
-                notification_service=notification_service,
-                curator_service=curator_service,
                 bot=self.application.bot
             )
             
@@ -554,7 +370,7 @@ class AINewsBot:
                 )
             
             # Отправляем дайджест ТОЛЬКО в чат кураторов (по ФТ)
-            curators_chat_id = "-1002983482030"  # Реальный ID чата кураторов
+            curators_chat_id = config.telegram.curator_chat_id
             await digest_service.send_digest_to_curators_chat(digest, curators_chat_id)
             
             # Убираем дублирующее сообщение - дайджест уже отправлен в чат кураторов
@@ -593,9 +409,6 @@ class AINewsBot:
                 expert_id = int(callback_data.split("_")[-1])
                 await self._handle_select_expert(query, user.id, expert_id)
                 
-            elif callback_data.startswith("expert_unavailable_"):
-                # Эксперт пока недоступен
-                await query.answer("⚠️ Этот эксперт пока недоступен для тестирования")
                 
             else:
                 await query.answer("❌ Неизвестная команда")
@@ -657,6 +470,56 @@ class AINewsBot:
             logger.error(f"❌ Ошибка при удалении новости: {e}")
             await query.answer("❌ Произошла ошибка")
     
+    async def _create_new_digest_after_removal(self, query, remaining_news):
+        """Создает новый дайджест с оставшимися новостями после удаления."""
+        try:
+            logger.info(f"🔄 Создаем новый дайджест с {len(remaining_news)} оставшимися новостями")
+            
+            # Создаем объекты DigestNews из оставшихся новостей
+            digest_news = []
+            for i, news in enumerate(remaining_news):
+                from src.services.morning_digest_service import DigestNews
+                digest_item = DigestNews(
+                    id=news.get('id', 0),
+                    title=news.get('title', 'Заголовок не найден'),
+                    summary=news.get('summary', 'Саммари не найдено'),
+                    source_links=news.get('source_links', ''),
+                    published_at=datetime.now(),
+                    curator_id=None
+                )
+                digest_news.append(digest_item)
+            
+            # Создаем новый дайджест
+            from src.services.morning_digest_service import MorningDigest
+            new_digest = MorningDigest(
+                date=datetime.now(),
+                news_count=len(digest_news),
+                news_items=digest_news,
+                curator_id=None
+            )
+            
+            # Создаем сообщение с новым дайджестом
+            message_text, buttons = self.morning_digest_service.create_interactive_digest_message(new_digest)
+            
+            # Очищаем текст от HTML тегов
+            cleaned_text = self.morning_digest_service._clean_html_text(message_text)
+            
+            # Отправляем новое сообщение вместо редактирования
+            from telegram import InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup(buttons)
+            
+            # Отправляем новое сообщение в тот же чат
+            await query.message.chat.send_message(
+                text=cleaned_text,
+                reply_markup=reply_markup
+            )
+            
+            logger.info(f"✅ Новый дайджест создан и отправлен с {len(digest_news)} новостями")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания нового дайджеста: {e}")
+            await query.answer("❌ Ошибка создания нового дайджеста")
+    
     async def _handle_select_expert(self, query, user_id: int, expert_id: int):
         """Обработка выбора эксперта."""
         try:
@@ -692,160 +555,6 @@ class AINewsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка при выборе эксперта: {e}")
             await query.answer("❌ Произошла ошибка")
-    
-    async def _update_moderation_message(self, query, remaining_news: List[Dict]):
-        """Обновляет сообщение с оставшимися новостями."""
-        try:
-            logger.info(f"📝 Обновляем сообщение модерации, осталось новостей: {len(remaining_news)}")
-            
-            # Проверяем длину сообщения
-            max_length = 4000
-            
-            # Создаем базовый заголовок
-            header = f"""
-🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
-📰 Осталось новостей: {len(remaining_news)}
-
-<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
-"""
-            
-            # Если новостей мало, отправляем как одно сообщение
-            if len(remaining_news) <= 5:
-                message_text = header
-                
-                # Добавляем оставшиеся новости
-                for i, news in enumerate(remaining_news, 1):
-                    message_text += f"""
-<b>{i}. {news['title']}</b>
-📝 {news['summary']}
-➡️ Источник: {news['source_links']}
-
-"""
-                
-                message_text += """
-<b>💡 ИНСТРУКЦИИ:</b>
-• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
-• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
-"""
-                
-                # Создаем кнопки
-                buttons = []
-                for i, news in enumerate(remaining_news):
-                    button_text = f"🗑️ Удалить {i+1}"
-                    callback_data = f"remove_news_{news['id']}"
-                    logger.info(f"🔘 Создаю кнопку: {button_text} -> {callback_data}")
-                    buttons.append([
-                        InlineKeyboardButton(
-                            button_text, 
-                            callback_data=callback_data
-                        )
-                    ])
-                
-                # Кнопка одобрения
-                approve_button = InlineKeyboardButton(
-                    "✅ Одобрить оставшиеся", 
-                    callback_data="approve_remaining"
-                )
-                buttons.append([approve_button])
-                
-                reply_markup = InlineKeyboardMarkup(buttons)
-                
-                # Обновляем сообщение
-                await query.edit_message_text(
-                    text=message_text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-                logger.info(f"✅ Сообщение модерации обновлено (одно сообщение)")
-                
-            else:
-                # Новостей много, отправляем новое сообщение с разбиением
-                await query.edit_message_text(
-                    "📝 Обновляем дайджест...",
-                    parse_mode="HTML"
-                )
-                
-                # Создаем новый дайджест и отправляем его
-                from src.services.morning_digest_service import MorningDigest, DigestNews
-                from datetime import datetime
-                
-                # Создаем объекты DigestNews
-                digest_news = []
-                for news in remaining_news:
-                    digest_item = DigestNews(
-                        id=news['id'],
-                        title=news['title'],
-                        summary=news['summary'],
-                        importance_score=news.get('importance_score', 5),
-                        category=news.get('category', 'Общие'),
-                        source_links=news.get('source_links', ''),
-                        published_at=news.get('published_at', datetime.now()),
-                        curator_id=news.get('curator_id')
-                    )
-                    digest_news.append(digest_item)
-                
-                # Создаем объект дайджеста
-                digest = MorningDigest(
-                    date=datetime.now(),
-                    news_count=len(digest_news),
-                    news_items=digest_news,
-                    total_importance=5,
-                    categories=['Общие'],
-                    curator_id=None
-                )
-                
-                # Отправляем новый дайджест через сервис
-                success = await self.morning_digest_service.send_digest_to_curators_chat(
-                    digest, 
-                    str(query.message.chat_id)
-                )
-                
-                if success:
-                    logger.info(f"✅ Новый дайджест успешно отправлен после удаления новости")
-                else:
-                    logger.error(f"❌ Не удалось отправить новый дайджест после удаления новости")
-
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при обновлении сообщения: {e}")
-            await query.answer("❌ Ошибка обновления сообщения")
-    
-    async def _show_expert_choice(self, query, approved_news: List[Dict]):
-        """Показывает выбор эксперта."""
-        try:
-            logger.info(f"👨‍💼 Показываем выбор эксперта для {len(approved_news)} новостей")
-            
-            if not hasattr(self, 'expert_choice_service') or not self.expert_choice_service:
-                logger.error("❌ ExpertChoiceService недоступен")
-                await query.edit_message_text("❌ Сервис выбора эксперта недоступен")
-                return
-            
-            message_text = f"""
-✅ <b>МОДЕРАЦИЯ ЗАВЕРШЕНА!</b>
-
-📰 Одобрено новостей: {len(approved_news)}
-👨‍💻 Выберите эксперта для комментариев:
-
-"""
-            
-            # Создаем кнопки выбора эксперта
-            buttons = self.expert_choice_service.create_expert_choice_buttons()
-            logger.info(f"🔘 Создано кнопок выбора эксперта: {len(buttons)}")
-            
-            reply_markup = InlineKeyboardMarkup(buttons)
-            
-            # Отправляем новое сообщение вместо редактирования (старое уже удалено)
-            await self.application.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=message_text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-            logger.info(f"✅ Сообщение выбора эксперта показано")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при показе выбора эксперта: {e}")
-            await query.answer("❌ Ошибка показа выбора эксперта")
     
     async def _send_news_to_expert(self, query, expert, user_id: int):
         """Отправляет одобренные новости эксперту в личку."""
@@ -1077,27 +786,12 @@ class AINewsBot:
     def _get_postgres_db(self):
         """Получает PostgreSQL сервис."""
         try:
-            from src.services.postgresql_database_service import PostgreSQLDatabaseService
             return PostgreSQLDatabaseService()
         except Exception as e:
             logger.error(f"❌ Ошибка получения PostgreSQL сервиса: {e}")
             return None
     
-    def _get_notification_service(self):
-        """Получает сервис уведомлений."""
-        try:
-            return self.notification_service
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения NotificationService: {e}")
-            return None
     
-    def _get_curator_service(self):
-        """Получает сервис кураторов."""
-        try:
-            return self.curator_service
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения CuratorService: {e}")
-            return None
     
     def _get_scheduler_service(self):
         """Получает сервис планировщика."""
@@ -1197,7 +891,6 @@ class AINewsBot:
         """Проверяет, является ли пользователь куратором."""
         try:
             # Для тестирования считаем всех пользователей кураторами
-            # В реальной системе здесь должна быть проверка в базе данных
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка проверки прав куратора: {e}")
@@ -1287,7 +980,6 @@ class AINewsBot:
                 logger.warning("🔍 Проверьте логи выше для диагностики проблемы")
             
             # Держим бота запущенным
-            import asyncio
             while True:
                 await asyncio.sleep(1)
             
@@ -1309,164 +1001,6 @@ class AINewsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка при остановке бота: {e}")
             raise
-    
-    async def _update_message_fallback(self, query, remaining_news: List[Dict]):
-        """
-        Fallback метод для обновления сообщения с сокращенным текстом.
-        
-        Args:
-            query: Callback query
-            remaining_news: Список оставшихся новостей
-        """
-        try:
-            # Создаем сокращенный текст
-            short_text = f"""
-🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
-📰 Осталось новостей: {len(remaining_news)}
-
-<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
-"""
-            # Добавляем только первые 3 новости для экономии места
-            for i, news in enumerate(remaining_news[:3], 1):
-                short_text += f"""
-<b>{i}. {news['title'][:50]}...</b>
-"""
-            
-            if len(remaining_news) > 3:
-                short_text += f"\n... и еще {len(remaining_news) - 3} новостей"
-            
-            short_text += """
-<b>💡 ИНСТРУКЦИИ:</b>
-• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
-• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
-"""
-            
-            # Создаем кнопки только для первых 3 новостей
-            buttons = []
-            for i, news in enumerate(remaining_news[:3]):
-                button_text = f"🗑️ Удалить {i+1}"
-                callback_data = f"remove_news_{news['id']}"
-                buttons.append([
-                    InlineKeyboardButton(
-                        button_text, 
-                        callback_data=callback_data
-                    )
-                ])
-            
-            # Кнопка одобрения
-            approve_button = InlineKeyboardButton(
-                "✅ Одобрить оставшиеся", 
-                callback_data="approve_remaining"
-            )
-            buttons.append([approve_button])
-            
-            reply_markup = InlineKeyboardMarkup(buttons)
-            
-            # Обновляем сообщение
-            await query.edit_message_text(
-                text=short_text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-            logger.info(f"✅ Сообщение обновлено с fallback (сокращенный текст)")
-            
-        except Exception as fallback_error:
-            logger.error(f"❌ Ошибка fallback обновления: {fallback_error}")
-            await query.answer("❌ Ошибка обновления дайджеста")
-    
-    async def _create_new_digest_after_removal(self, query, remaining_news: List[Dict]):
-        """
-        Создает новый дайджест после удаления новости.
-        
-        Args:
-            query: CallbackQuery от Telegram
-            remaining_news: Список оставшихся новостей
-        """
-        try:
-            logger.info(f"🔄 Создаем новый дайджест после удаления новости, осталось: {len(remaining_news)}")
-            
-            # Создаем объекты DigestNews
-            from src.services.morning_digest_service import MorningDigest, DigestNews
-            from datetime import datetime
-            
-            digest_news = []
-            for news in remaining_news:
-                digest_item = DigestNews(
-                    id=news['id'],
-                    title=news['title'],
-                    summary=news['summary'],
-                    importance_score=news.get('importance_score', 5),
-                    category=news.get('category', 'Общие'),
-                    source_links=news['source_links'],
-                    published_at=news.get('published_at', datetime.now()),
-                    curator_id=news.get('curator_id')
-                )
-                digest_news.append(digest_item)
-            
-            # Создаем объект дайджеста
-            digest = MorningDigest(
-                date=datetime.now(),
-                news_count=len(digest_news),
-                news_items=digest_news,
-                total_importance=5,
-                categories=['Общие']
-            )
-            
-            # Отправляем новый дайджест через сервис
-            success = await self.morning_digest_service.send_digest_to_curators_chat(
-                digest, 
-                str(query.message.chat_id)
-            )
-            
-            if success:
-                logger.info(f"✅ Новый дайджест успешно отправлен после удаления новости")
-            else:
-                logger.error(f"❌ Не удалось отправить новый дайджест после удаления новости")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания нового дайджеста после удаления: {e}")
-    
-    async def _force_delete_digest_messages(self, chat_id: str):
-        """
-        Принудительно удаляет все сообщения дайджеста по содержимому.
-        
-        Args:
-            chat_id: ID чата
-        """
-        try:
-            logger.info(f"🗑️ Принудительно удаляем сообщения дайджеста для чата: {chat_id}")
-            
-            if not hasattr(self, 'morning_digest_service') or not self.morning_digest_service:
-                logger.warning("⚠️ MorningDigestService недоступен")
-                return
-            
-            # Получаем последние сообщения и ищем дайджест
-            try:
-                # Получаем последние 50 сообщений
-                messages = await self.application.bot.get_chat_history(chat_id=int(chat_id), limit=50)
-                deleted_count = 0
-                
-                for msg in messages:
-                    if msg.text and any(keyword in msg.text for keyword in ["УТРЕННИЙ ДАЙДЖЕСТ", "НОВОСТИ ДЛЯ МОДЕРАЦИИ", "🗑️ Удалить"]):
-                        try:
-                            await self.application.bot.delete_message(
-                                chat_id=int(chat_id), 
-                                message_id=msg.message_id
-                            )
-                            deleted_count += 1
-                            logger.info(f"🗑️ Принудительно удалено сообщение дайджеста: {msg.message_id}")
-                            await asyncio.sleep(0.1)  # Небольшая задержка
-                        except Exception as e:
-                            logger.warning(f"⚠️ Не удалось принудительно удалить сообщение {msg.message_id}: {e}")
-                            continue
-                
-                logger.info(f"✅ Принудительно удалено {deleted_count} сообщений дайджеста")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка принудительного удаления: {e}")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка принудительного удаления сообщений: {e}")
     
     async def _handle_approve_remaining(self, query, user_id: int):
         """Обработка одобрения оставшихся новостей."""
@@ -1489,7 +1023,18 @@ class AINewsBot:
                 # Если не удалось через сессию, принудительно удаляем по содержимому
                 if not cleanup_success:
                     logger.warning(f"⚠️ Не удалось удалить через сессию, принудительно удаляем по содержимому")
-                    await self._force_delete_digest_messages(chat_id)
+                    try:
+                        logger.info(f"🗑️ Принудительно удаляем сообщения дайджеста для чата: {chat_id}")
+                        
+                        if not hasattr(self, 'morning_digest_service') or not self.morning_digest_service:
+                            logger.warning("⚠️ MorningDigestService недоступен")
+                            return
+                        
+                        # Принудительное удаление отключено (метод get_chat_history недоступен)
+                        logger.info("ℹ️ Принудительное удаление отключено")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка принудительного удаления сообщений: {e}")
                 
                 logger.info(f"✅ Все части дайджеста удалены для чата {chat_id}")
                 
@@ -1505,570 +1050,13 @@ class AINewsBot:
             
             if approved_news:
                 # Показываем выбор эксперта
-                await self._show_expert_choice(query, approved_news)
+                await self._show_expert_choice(query, user_id, approved_news)
             else:
                 await query.answer("❌ Нет одобренных новостей")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка при одобрении новостей: {e}")
             await query.answer("❌ Произошла ошибка")
-    
-    async def _handle_select_expert(self, query, user_id: int, expert_id: int):
-        """Обработка выбора эксперта."""
-        try:
-            logger.info(f"👨‍💼 Обрабатываем выбор эксперта {expert_id} для пользователя {user_id}")
-            
-            if not hasattr(self, 'expert_choice_service') or not self.expert_choice_service:
-                logger.error("❌ ExpertChoiceService недоступен")
-                await query.answer("❌ Сервис выбора эксперта недоступен")
-                return
-            
-            expert = self.expert_choice_service.get_expert_by_id(expert_id)
-            logger.info(f"👨‍💼 Получен эксперт: {expert}")
-            
-            if not expert:
-                logger.error("❌ Эксперт не найден")
-                await query.answer("❌ Эксперт не найден")
-                return
-            
-            logger.info(f"👨‍💼 Эксперт найден: {expert.name}, is_test: {expert.is_test}")
-            
-            if expert.is_test:
-                # Сохраняем выбранного эксперта как эксперта недели
-                logger.info(f"👨‍💼 Сохраняем эксперта {expert.name} как эксперта недели")
-                self.service.set_expert_of_week(expert.id)
-                
-                # Тестовый эксперт - отправляем новости в личку
-                logger.info(f"👨‍💼 Отправляем новости тестовому эксперту {expert.name}")
-                await self._send_news_to_expert(query, expert, user_id)
-            else:
-                logger.info(f"⚠️ Эксперт {expert.name} пока недоступен")
-                await query.answer("⚠️ Этот эксперт пока недоступен")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при выборе эксперта: {e}")
-            await query.answer("❌ Произошла ошибка")
-    
-    async def _update_moderation_message(self, query, remaining_news: List[Dict]):
-        """Обновляет сообщение с оставшимися новостями."""
-        try:
-            logger.info(f"📝 Обновляем сообщение модерации, осталось новостей: {len(remaining_news)}")
-            
-            # Проверяем длину сообщения
-            max_length = 4000
-            
-            # Создаем базовый заголовок
-            header = f"""
-🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
-📰 Осталось новостей: {len(remaining_news)}
-
-<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
-"""
-            
-            # Если новостей мало, отправляем как одно сообщение
-            if len(remaining_news) <= 5:
-                message_text = header
-                
-                # Добавляем оставшиеся новости
-                for i, news in enumerate(remaining_news, 1):
-                    message_text += f"""
-<b>{i}. {news['title']}</b>
-📝 {news['summary']}
-➡️ Источник: {news['source_links']}
-
-"""
-                
-                message_text += """
-<b>💡 ИНСТРУКЦИИ:</b>
-• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
-• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
-"""
-                
-                # Создаем кнопки
-                buttons = []
-                for i, news in enumerate(remaining_news):
-                    button_text = f"🗑️ Удалить {i+1}"
-                    callback_data = f"remove_news_{news['id']}"
-                    logger.info(f"🔘 Создаю кнопку: {button_text} -> {callback_data}")
-                    buttons.append([
-                        InlineKeyboardButton(
-                            button_text, 
-                            callback_data=callback_data
-                        )
-                    ])
-                
-                # Кнопка одобрения
-                approve_button = InlineKeyboardButton(
-                    "✅ Одобрить оставшиеся", 
-                    callback_data="approve_remaining"
-                )
-                buttons.append([approve_button])
-                
-                reply_markup = InlineKeyboardMarkup(buttons)
-                
-                # Обновляем сообщение
-                await query.edit_message_text(
-                    text=message_text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-                logger.info(f"✅ Сообщение модерации обновлено (одно сообщение)")
-                
-            else:
-                # Новостей много, отправляем новое сообщение с разбиением
-                await query.edit_message_text(
-                    "📝 Обновляем дайджест...",
-                    parse_mode="HTML"
-                )
-                
-                # Создаем новый дайджест и отправляем его
-                from src.services.morning_digest_service import MorningDigest, DigestNews
-                from datetime import datetime
-                
-                # Создаем объекты DigestNews
-                digest_news = []
-                for news in remaining_news:
-                    digest_item = DigestNews(
-                        id=news['id'],
-                        title=news['title'],
-                        summary=news['summary'],
-                        importance_score=news.get('importance_score', 5),
-                        category=news.get('category', 'Общие'),
-                        source_links=news.get('source_links', ''),
-                        published_at=news.get('published_at', datetime.now()),
-                        curator_id=news.get('curator_id')
-                    )
-                    digest_news.append(digest_item)
-                
-                # Создаем объект дайджеста
-                digest = MorningDigest(
-                    date=datetime.now(),
-                    news_count=len(digest_news),
-                    news_items=digest_news,
-                    total_importance=5,
-                    categories=['Общие'],
-                    curator_id=None
-                )
-                
-                # Отправляем новый дайджест через сервис
-                success = await self.morning_digest_service.send_digest_to_curators_chat(
-                    digest, 
-                    str(query.message.chat_id)
-                )
-                
-                if success:
-                    logger.info(f"✅ Новый дайджест успешно отправлен после удаления новости")
-                else:
-                    logger.error(f"❌ Не удалось отправить новый дайджест после удаления новости")
-
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при обновлении сообщения: {e}")
-            await query.answer("❌ Ошибка обновления сообщения")
-    
-    async def _show_expert_choice(self, query, approved_news: List[Dict]):
-        """Показывает выбор эксперта."""
-        try:
-            logger.info(f"👨‍💼 Показываем выбор эксперта для {len(approved_news)} новостей")
-            
-            if not hasattr(self, 'expert_choice_service') or not self.expert_choice_service:
-                logger.error("❌ ExpertChoiceService недоступен")
-                await query.edit_message_text("❌ Сервис выбора эксперта недоступен")
-                return
-            
-            message_text = f"""
-✅ <b>МОДЕРАЦИЯ ЗАВЕРШЕНА!</b>
-
-📰 Одобрено новостей: {len(approved_news)}
-👨‍💻 Выберите эксперта для комментариев:
-
-"""
-            
-            # Создаем кнопки выбора эксперта
-            buttons = self.expert_choice_service.create_expert_choice_buttons()
-            logger.info(f"🔘 Создано кнопок выбора эксперта: {len(buttons)}")
-            
-            reply_markup = InlineKeyboardMarkup(buttons)
-            
-            # Отправляем новое сообщение вместо редактирования (старое уже удалено)
-            await self.application.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=message_text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-            logger.info(f"✅ Сообщение выбора эксперта показано")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при показе выбора эксперта: {e}")
-            await query.answer("❌ Ошибка показа выбора эксперта")
-    
-    async def _send_news_to_expert(self, query, expert, user_id: int):
-        """Отправляет одобренные новости эксперту в личку."""
-        try:
-            logger.info(f"📤 Начинаем отправку новостей эксперту {expert.name} (ID: {expert.id})")
-            
-            # Проверяем доступность сервисов
-            if not hasattr(self, 'interactive_moderation_service') or not self.interactive_moderation_service:
-                logger.error("❌ InteractiveModerationService недоступен")
-                await query.answer("❌ Сервис модерации недоступен")
-                return
-            
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
-                logger.error("❌ ExpertInteractionService недоступен")
-                await query.answer("❌ Сервис взаимодействия с экспертами недоступен")
-                return
-            
-            # Получаем одобренные новости из сессии
-            approved_news = self.interactive_moderation_service.get_remaining_news(user_id)
-            logger.info(f"📰 Получены одобренные новости: {len(approved_news)} штук")
-            
-            if not approved_news:
-                logger.warning("⚠️ Нет одобренных новостей для отправки")
-                await query.answer("❌ Нет одобренных новостей для отправки")
-                return
-            
-            # Определяем ID эксперта для отправки
-            if expert.is_test:
-                # Для тестового эксперта используем его Telegram ID
-                expert_telegram_id = int(expert.telegram_id)
-                expert_name = expert.name
-                logger.info(f"👨‍💼 Тестовый эксперт: {expert_name}, Telegram ID: {expert_telegram_id}")
-            else:
-                # Для реальных экспертов пока заглушка
-                logger.info(f"⚠️ Реальный эксперт {expert.name} пока не подключен")
-                await query.answer("⚠️ Реальные эксперты пока не подключены")
-                return
-            
-            # Отправляем новости эксперту через новый сервис
-            logger.info(f"📤 Отправляем {len(approved_news)} новостей эксперту {expert_name}")
-            success = await self.expert_interaction_service.send_news_to_expert(
-                expert_telegram_id, 
-                approved_news, 
-                expert_name
-            )
-            
-            if success:
-                logger.info(f"✅ Новости успешно отправлены эксперту {expert_name}")
-                
-                # Очищаем сессию модерации после успешной отправки
-                if hasattr(self, 'interactive_moderation_service') and self.interactive_moderation_service:
-                    self.interactive_moderation_service.cleanup_moderation_session(user_id)
-                    logger.info(f"🧹 Сессия модерации для пользователя {user_id} очищена")
-                
-                # Обновляем сообщение в чате кураторов
-                await query.edit_message_text(
-                    text=f"✅ <b>Новости отправлены эксперту!</b>\n\n"
-                         f"👨‍💻 <b>Эксперт:</b> {expert.name}\n"
-                         f"📰 <b>Количество новостей:</b> {len(approved_news)}\n"
-                         f"📤 <b>Статус:</b> Отправлено в личку\n\n"
-                         f"⏰ <b>Ожидаем комментарии эксперта...</b>",
-                    parse_mode="HTML"
-                )
-                
-                await query.answer(f"✅ Новости отправлены эксперту {expert.name}")
-            else:
-                logger.error(f"❌ Ошибка отправки новостей эксперту {expert_name}")
-                await query.answer("❌ Ошибка отправки новостей эксперту")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при отправке новостей эксперту: {e}")
-            await query.answer("❌ Произошла ошибка")
-    
-    async def _handle_comment_request(self, query, expert_id: int, news_id: int):
-        """Обрабатывает запрос эксперта на комментирование новости."""
-        try:
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
-                await query.answer("❌ Сервис взаимодействия с экспертами недоступен")
-                return
-            
-            # Получаем инструкции для комментирования
-            instructions = await self.expert_interaction_service.handle_comment_request(expert_id, news_id)
-            
-            # Отправляем инструкции эксперту
-            await query.message.reply_text(
-                text=instructions,
-                parse_mode="HTML"
-            )
-            
-            await query.answer("💬 Готовы к комментированию!")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при обработке запроса на комментирование: {e}")
-            await query.answer("❌ Произошла ошибка")
-    
-    # ==================== ЗАПУСК БОТА ====================
-    
-    
-    async def schedule_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка команды /schedule_status - статус планировщика."""
-        user = update.effective_user
-        
-        logger.info(f"📊 Команда /schedule_status от пользователя {user.id}")
-        
-        try:
-            # Проверяем права куратора
-            if not await self._is_curator(user.id):
-                await update.message.reply_text("❌ У вас нет прав для просмотра статуса планировщика!")
-                return
-            
-            # Получаем сервис планировщика
-            scheduler_service = self._get_scheduler_service()
-            if not scheduler_service:
-                await update.message.reply_text("❌ Сервис планировщика недоступен!")
-                return
-            
-            # Получаем статус
-            status = scheduler_service.get_status()
-            
-            response = f"📊 Статус планировщика\n\n"
-            response += f"🔄 Статус: {'✅ Запущен' if status.get('is_running') else '❌ Остановлен'}\n"
-            response += f"📅 Следующий дайджест: {status.get('next_morning_digest', 'Не установлено')}\n"
-            response += f"📋 Задач в очереди: {status.get('jobs_count', 0)}\n"
-            response += f"💬 Чат кураторов: ID {scheduler_service.morning_digest_service.curators_chat_id}\n\n"
-            response += f"📋 Доступные команды:\n"
-            response += f"`schedule` - Запустить планировщик\n"
-            response += f"`morning_digest` - Отправить дайджест сейчас"
-            
-            await update.message.reply_text(response)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в schedule_status_command: {e}")
-            await update.message.reply_text(f"❌ Ошибка получения статуса: {e}")
-    
-    async def _is_curator(self, user_id: int) -> bool:
-        """Проверяет, является ли пользователь куратором."""
-        try:
-            # Для тестирования считаем всех пользователей кураторами
-            # В реальной системе здесь должна быть проверка в базе данных
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка проверки прав куратора: {e}")
-            return False
- 
-    async def proxy_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показывает статус ProxyAPI сервиса."""
-        try:
-            # Получаем статус ProxyAPI через AIAnalysisService
-            if hasattr(self, 'ai_analysis_service'):
-                status = self.ai_analysis_service.get_proxy_status()
-            else:
-                status = {
-                    "service": "AIAnalysisService",
-                    "proxy_available": False,
-                    "message": "Сервис AI анализа недоступен"
-                }
-            
-            # Форматируем ответ
-            status_text = f"""
-🔍 <b>Статус ProxyAPI сервиса</b>
-
-📊 <b>Сервис:</b> {status.get('service', 'Неизвестно')}
-🚀 <b>ProxyAPI доступен:</b> {'✅ Да' if status.get('proxy_available') else '❌ Нет'}
-
-"""
-            
-            if status.get('proxy_available'):
-                status_text += f"""
-🔗 <b>Прокси URL:</b> <code>{status.get('proxy_url', 'Не указан')}</code>
-🔑 <b>ProxyAPI ключ установлен:</b> {'✅ Да' if status.get('proxy_api_key_set') else '❌ Нет'}
-🤖 <b>Клиент инициализирован:</b> {'✅ Да' if status.get('client_initialized') else '❌ Нет'}
-
-✅ <b>ProxyAPI работает и будет использован для AI анализа!</b>
-"""
-            else:
-                status_text += f"""
-⚠️ <b>ProxyAPI недоступен</b>
-
-📝 <b>Для настройки ProxyAPI:</b>
-1. Получите прокси URL от вашего провайдера
-2. Добавьте в .env файл:
-   PROXY_API_URL=https://your-proxy-domain.com/v1
-   PROXY_API_KEY=sk-your-proxy-key
-3. Перезапустите бота
-
-ℹ️ <b>Текущий режим:</b> Fallback анализ (без AI)
-"""
-            
-            await update.message.reply_text(status_text, parse_mode="HTML")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в proxy_status_command: {e}")
-            await update.message.reply_text(
-                "❌ Ошибка при получении статуса ProxyAPI. Проверьте логи."
-            )
-    
-    # ==================== ЗАПУСК БОТА ====================
-    
-    async def run(self):
-        """Запуск бота."""
-        logger.info("🚀 Запуск AI News Assistant Bot...")
-        
-        try:
-            # Инициализируем и запускаем бота
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling()
-            
-            logger.info("✅ Бот успешно запущен!")
-            
-            # Автоматически запускаем планировщик при старте бота
-            logger.info(f"🔍 Проверяем SchedulerService: {self.scheduler_service}")
-            
-            if self.scheduler_service:
-                try:
-                    logger.info("🚀 Запускаем планировщик...")
-                    await self.scheduler_service.start()
-                    logger.info("✅ Планировщик автоматически запущен при старте бота")
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось автоматически запустить планировщик: {e}")
-                    logger.warning(f"⚠️ Тип ошибки: {type(e).__name__}")
-                    import traceback
-                    logger.warning(f"⚠️ Полный traceback: {traceback.format_exc()}")
-                    logger.info("ℹ️ Планировщик можно запустить вручную командой /schedule")
-            else:
-                logger.warning("⚠️ SchedulerService недоступен - планировщик не будет работать")
-                logger.warning("🔍 Проверьте логи выше для диагностики проблемы")
-            
-            # Держим бота запущенным
-            import asyncio
-            while True:
-                await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при запуске бота: {e}")
-            raise
-    
-    async def stop(self):
-        """Остановка бота."""
-        logger.info("🛑 Остановка бота...")
-        
-        try:
-            await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
-            
-            logger.info("✅ Бот успешно остановлен!")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при остановке бота: {e}")
-            raise
-    
-    async def _update_message_fallback(self, query, remaining_news: List[Dict]):
-        """
-        Fallback метод для обновления сообщения с сокращенным текстом.
-        
-        Args:
-            query: Callback query
-            remaining_news: Список оставшихся новостей
-        """
-        try:
-            # Создаем сокращенный текст
-            short_text = f"""
-🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
-📰 Осталось новостей: {len(remaining_news)}
-
-<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
-"""
-            # Добавляем только первые 3 новости для экономии места
-            for i, news in enumerate(remaining_news[:3], 1):
-                short_text += f"""
-<b>{i}. {news['title'][:50]}...</b>
-"""
-            
-            if len(remaining_news) > 3:
-                short_text += f"\n... и еще {len(remaining_news) - 3} новостей"
-            
-            short_text += """
-<b>💡 ИНСТРУКЦИИ:</b>
-• Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
-• После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
-"""
-            
-            # Создаем кнопки только для первых 3 новостей
-            buttons = []
-            for i, news in enumerate(remaining_news[:3]):
-                button_text = f"🗑️ Удалить {i+1}"
-                callback_data = f"remove_news_{news['id']}"
-                buttons.append([
-                    InlineKeyboardButton(
-                        button_text, 
-                        callback_data=callback_data
-                    )
-                ])
-            
-            # Кнопка одобрения
-            approve_button = InlineKeyboardButton(
-                "✅ Одобрить оставшиеся", 
-                callback_data="approve_remaining"
-            )
-            buttons.append([approve_button])
-            
-            reply_markup = InlineKeyboardMarkup(buttons)
-            
-            # Обновляем сообщение
-            await query.edit_message_text(
-                text=short_text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-            logger.info(f"✅ Сообщение обновлено с fallback (сокращенный текст)")
-            
-        except Exception as fallback_error:
-            logger.error(f"❌ Ошибка fallback обновления: {fallback_error}")
-            await query.answer("❌ Ошибка обновления дайджеста")
-    
-    async def _create_new_digest_after_removal(self, query, remaining_news: List[Dict]):
-        """
-        Создает новый дайджест после удаления новости.
-        
-        Args:
-            query: CallbackQuery от Telegram
-            remaining_news: Список оставшихся новостей
-        """
-        try:
-            logger.info(f"🔄 Создаем новый дайджест после удаления новости, осталось: {len(remaining_news)}")
-            
-            # Создаем объекты DigestNews
-            from src.services.morning_digest_service import MorningDigest, DigestNews
-            from datetime import datetime
-            
-            digest_news = []
-            for news in remaining_news:
-                digest_item = DigestNews(
-                    id=news['id'],
-                    title=news['title'],
-                    summary=news['summary'],
-                    importance_score=news.get('importance_score', 5),
-                    category=news.get('category', 'Общие'),
-                    source_links=news['source_links'],
-                    published_at=news.get('published_at', datetime.now()),
-                    curator_id=news.get('curator_id')
-                )
-                digest_news.append(digest_item)
-            
-            # Создаем объект дайджеста
-            digest = MorningDigest(
-                date=datetime.now(),
-                news_count=len(digest_news),
-                news_items=digest_news,
-                total_importance=5,
-                categories=['Общие']
-            )
-            
-            # Отправляем новый дайджест через сервис
-            success = await self.morning_digest_service.send_digest_to_curators_chat(
-                digest, 
-                str(query.message.chat_id)
-            )
-            
-            if success:
-                logger.info(f"✅ Новый дайджест успешно отправлен после удаления новости")
-            else:
-                logger.error(f"❌ Не удалось отправить новый дайджест после удаления новости")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания нового дайджеста после удаления: {e}")
     
     # ==================== МЕТОДЫ ДЛЯ ПАРСИНГА ====================
     
@@ -2265,26 +1253,39 @@ class AINewsBot:
             
             logger.info(f"📸 Получено фото с file_id: {photo_file_id}")
             
-            # Публикуем дайджест с фото через PublicationService
-            logger.info(f"🔍 Проверка PublicationService: hasattr={hasattr(self, 'publication_service')}, service={self.publication_service}")
-            if hasattr(self, 'publication_service') and self.publication_service:
-                logger.info(f"📤 Вызываем publish_digest_with_photo с digest_text длиной {len(digest_text)} и photo_file_id {photo_file_id}")
-                result = await self.publication_service.publish_digest_with_photo(digest_text, photo_file_id)
-                logger.info(f"📤 Результат публикации: {result}")
+            # Публикуем дайджест с фото напрямую
+            try:
+                # Получаем токен бота и ID канала
+                bot_token = config.telegram.bot_token
+                channel_id = config.telegram.channel_id
                 
-                if result["success"]:
-                    # Убираем состояние ожидания фото
-                    if user_id in self.waiting_for_photo:
-                        del self.waiting_for_photo[user_id]
-                        logger.info(f"🔄 Снято состояние ожидания фото для пользователя {user_id}")
-                    
-                    await update.message.reply_text("🎉 Дайджест успешно опубликован в канал с фото!")
-                    logger.info(f"✅ Дайджест опубликован в канал с message_id: {result['message_id']}")
+                # Обрезаем текст для подписи (лимит Telegram: 1024 символа)
+                max_caption_length = config.telegram.max_photo_caption_length
+                if len(digest_text) > max_caption_length:
+                    caption_text = digest_text[:max_caption_length - 3] + "..."
+                    logger.info(f"📝 Текст подписи обрезан с {len(digest_text)} до {len(caption_text)} символов")
                 else:
-                    await update.message.reply_text(f"❌ Ошибка публикации: {result['error']}")
-            else:
-                logger.error("❌ PublicationService недоступен")
-                await update.message.reply_text("❌ Сервис публикации недоступен")
+                    caption_text = digest_text
+                
+                # Отправляем фото с подписью
+                await self.application.bot.send_photo(
+                    chat_id=channel_id,
+                    photo=photo_file_id,
+                    caption=caption_text,
+                    parse_mode="HTML"
+                )
+                
+                # Убираем состояние ожидания фото
+                if user_id in self.waiting_for_photo:
+                    del self.waiting_for_photo[user_id]
+                    logger.info(f"🔄 Снято состояние ожидания фото для пользователя {user_id}")
+                
+                await update.message.reply_text("🎉 Дайджест успешно опубликован в канал с фото!")
+                logger.info(f"✅ Дайджест опубликован в канал")
+                
+            except Exception as e:
+                await update.message.reply_text(f"❌ Ошибка публикации: {str(e)}")
+                logger.error(f"❌ Ошибка публикации дайджеста: {e}")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки фото для публикации: {e}")
@@ -2311,6 +1312,45 @@ class AINewsBot:
             logger.error(f"❌ Ошибка обработки одобрения исправленного дайджеста: {e}")
             await query.answer("❌ Произошла ошибка")
 
+    async def _show_expert_choice(self, query, user_id: int, approved_news: list):
+        """
+        Показывает выбор эксперта для одобренных новостей.
+        
+        Args:
+            query: Callback query
+            user_id: ID пользователя
+            approved_news: Список одобренных новостей
+        """
+        try:
+            logger.info(f"👨‍💻 Показываем выбор эксперта для {len(approved_news)} новостей")
+            
+            # Получаем кнопки для выбора эксперта
+            buttons = self.expert_choice_service.create_expert_choice_buttons()
+            
+            # Создаем сообщение
+            message_text = f"""
+✅ НОВОСТИ ОДОБРЕНЫ!
+
+📰 Количество новостей: {len(approved_news)}
+
+👨‍💻 Выберите эксперта для комментирования:
+"""
+            
+            # Отправляем сообщение с кнопками выбора эксперта
+            from telegram import InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup(buttons)
+            
+            await query.message.reply_text(
+                text=message_text,
+                reply_markup=reply_markup
+            )
+            
+            logger.info(f"✅ Выбор эксперта показан для пользователя {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка показа выбора эксперта: {e}")
+            await query.answer("❌ Ошибка при выборе эксперта")
+
 
 # ==================== ФУНКЦИЯ ЗАПУСКА ====================
 
@@ -2319,10 +1359,6 @@ async def main():
     # Получаем токен из переменных окружения
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     
-    # Временное решение: используем токен напрямую
-    if not token:
-        token = "8195833718:AAGbqnbZz7NrbOWN5ic5k7oxGMUTntgHE6s"
-        logger.info("🔧 Используем токен из кода (временное решение)")
     
     if not token:
         logger.error("❌ TELEGRAM_BOT_TOKEN не найден в переменных окружения!")
@@ -2332,11 +1368,6 @@ async def main():
     # Создаем и запускаем бота
     bot = AINewsBot(token)
     
-    # Делаем бот доступным глобально для других модулей
-    import sys
-    current_module = sys.modules[__name__]
-    current_module.bot_instance = bot
-    logger.info("✅ Бот сделан доступным глобально")
     
     try:
         await bot.run()
@@ -2349,5 +1380,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main()) 

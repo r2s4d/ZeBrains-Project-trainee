@@ -11,6 +11,7 @@ from datetime import datetime, time
 from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -42,29 +43,29 @@ class SchedulerService:
         """Запускает планировщик."""
         try:
             if not self.is_running:
-                # Добавляем задачу отправки дайджеста в 9:00
+                # Добавляем задачу отправки дайджеста
                 self.scheduler.add_job(
                     func=self._send_morning_digest,
-                    trigger=CronTrigger(hour=9, minute=0),
+                    trigger=CronTrigger(hour=config.scheduler.morning_digest_hour, minute=config.scheduler.morning_digest_minute),
                     id="morning_digest",
                     name="Отправка утреннего дайджеста",
                     replace_existing=True
                 )
                 
-                # Добавляем автоматический парсинг новостей каждые 2 часа (9:00-21:00)
+                # Добавляем автоматический парсинг новостей
                 if self.news_parser_service:
                     self.scheduler.add_job(
                         func=self._parse_news_automatically,
-                        trigger=CronTrigger(hour="9-21", minute=0),  # Каждый час с 9:00 до 21:00
+                        trigger=CronTrigger(hour=f"{config.scheduler.news_parsing_start_hour}-{config.scheduler.news_parsing_end_hour}", minute=config.scheduler.news_parsing_minute),
                         id="auto_parse_news",
                         name="Автоматический парсинг новостей",
                         replace_existing=True
                     )
                     
-                    # Ночной парсинг каждые 4 часа (21:00-9:00)
+                    # Ночной парсинг
                     self.scheduler.add_job(
                         func=self._parse_news_automatically,
-                        trigger=CronTrigger(hour="21-23,0-8", minute=0),  # Каждый час с 21:00 до 8:00
+                        trigger=CronTrigger(hour=config.scheduler.night_parsing_hours, minute=config.scheduler.night_parsing_minute),
                         id="auto_parse_news_night",
                         name="Ночной парсинг новостей",
                         replace_existing=True
@@ -140,65 +141,6 @@ class SchedulerService:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка автоматического парсинга новостей: {e}")
-    
-    async def send_digest_now(self) -> bool:
-        """
-        Отправляет дайджест прямо сейчас (для тестирования).
-        
-        Returns:
-            bool: Успешность отправки
-        """
-        try:
-            logger.info("🚀 Принудительная отправка дайджеста...")
-            
-            # Создаем дайджест
-            digest = await self.morning_digest_service.create_morning_digest()
-            
-            if digest and digest.news_count > 0:
-                # Отправляем в чат кураторов
-                success = await self.morning_digest_service.send_digest_to_curators_chat_auto(digest)
-                
-                if success:
-                    logger.info(f"✅ Дайджест отправлен принудительно: {digest.news_count} новостей")
-                    return True
-                else:
-                    logger.error("❌ Ошибка принудительной отправки дайджеста")
-                    return False
-            else:
-                logger.info("ℹ️ Нет новостей для дайджеста")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка принудительной отправки дайджеста: {e}")
-            return False
-    
-    async def parse_news_now(self) -> bool:
-        """
-        Запускает парсинг новостей прямо сейчас (для тестирования).
-        
-        Returns:
-            bool: Успешность парсинга
-        """
-        try:
-            if not self.news_parser_service:
-                logger.warning("⚠️ NewsParserService недоступен для парсинга")
-                return False
-                
-            logger.info("🚀 Принудительный запуск парсинга новостей...")
-            
-            # Парсим все источники
-            result = await self.news_parser_service.parse_all_sources()
-            
-            if result:
-                logger.info(f"✅ Парсинг новостей завершен: {result.get('total_parsed', 0)} новостей")
-                return True
-            else:
-                logger.warning("⚠️ Парсинг новостей не вернул результатов")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка принудительного парсинга новостей: {e}")
-            return False
     
     def get_next_run_time(self) -> Optional[datetime]:
         """

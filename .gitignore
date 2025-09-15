@@ -137,3 +137,11 @@ keys/
 # Local configuration
 config.local.py
 settings.local.py
+PROGRESS_NOTES.md
+HOMEWORK.md
+ASSIGNMENTS.md
+migrate_*.py
+create_*.py
+.cursor/
+cursor-rules/
+REFACTORING_PLAN.md

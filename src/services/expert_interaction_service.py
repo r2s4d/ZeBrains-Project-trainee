@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,8 @@ class ExpertInteractionService:
         self.comments: List[ExpertComment] = []  # Хранение в памяти
         
         # Настройки напоминаний
-        self.REMINDER_INTERVAL = 3600  # 1 час в секундах
-        self.CURATOR_ALERT_THRESHOLD = 14400  # 4 часа в секундах
+        self.REMINDER_INTERVAL = config.timeout.reminder_interval
+        self.CURATOR_ALERT_THRESHOLD = config.timeout.curator_alert_threshold
         
         logger.info("✅ ExpertInteractionService инициализирован")
         if curator_approval_service:
@@ -225,7 +226,7 @@ class ExpertInteractionService:
         
         return news_text
     
-    def _split_news_list_for_expert(self, news_items: List[Dict], max_length: int = 3500) -> List[Dict]:
+    def _split_news_list_for_expert(self, news_items: List[Dict], max_length: int = None) -> List[Dict]:
         """
         Разбивает список новостей на части для эксперта.
         
@@ -239,18 +240,21 @@ class ExpertInteractionService:
         if not news_items:
             return []
         
+        if max_length is None:
+            max_length = config.message.max_news_list_length
+        
         parts = []
         current_part = "📰 <b>Новости для комментирования:</b>\n\n"
         current_news = []
         current_buttons = []
         
-        for i, news in enumerate(news_items, 1):
+        for i, news in enumerate(news_items):
             title = self._clean_html_text(news.get('title', 'Без заголовка'))
             summary = self._clean_html_text(news.get('summary', 'Без описания'))
             source = self._clean_html_text(news.get('source_links', 'Не указан'))
             
             news_text = f"""
-<b>{i}. {title}</b>
+<b>{i+1}. {title}</b>
 📝 {summary}
 ➡️ Источник: {source}
 
@@ -267,13 +271,13 @@ class ExpertInteractionService:
                 
                 # Начинаем новую часть
                 current_part = "📰 <b>Новости для комментирования:</b>\n\n" + news_text
-                current_news = [i-1]
-                current_buttons = [i-1]
+                current_news = [i]
+                current_buttons = [i]
             else:
                 # Добавляем новость к текущей части
                 current_part += news_text
-                current_news.append(i-1)
-                current_buttons.append(i-1)
+                current_news.append(i)
+                current_buttons.append(i)
         
         # Добавляем последнюю часть
         if current_part and current_part != "📰 <b>Новости для комментирования:</b>\n\n":
@@ -522,7 +526,7 @@ class ExpertInteractionService:
         """Уведомляет кураторов о завершении работы эксперта и создает финальный дайджест."""
         try:
             # ID чата кураторов
-            curators_chat_id = "-1002983482030"
+            curators_chat_id = config.telegram.curator_chat_id
             
             session = self.active_sessions.get(expert_id)
             if not session:
@@ -563,13 +567,13 @@ class ExpertInteractionService:
             # Импортируем необходимые сервисы
             from src.services.final_digest_formatter_service import FinalDigestFormatterService
             from src.services.curator_approval_service import CuratorApprovalService
-            from src.services.bot_database_service import BotDatabaseService
+            from src.services.postgresql_database_service import PostgreSQLDatabaseService
             from src.services.ai_analysis_service import AIAnalysisService
             
             # Инициализируем сервисы
             ai_service = AIAnalysisService()  # ProxyAPI уже инициализируется в конструкторе
             formatter_service = FinalDigestFormatterService(ai_service)
-            database_service = BotDatabaseService()
+            database_service = PostgreSQLDatabaseService()
             
             # Получаем данные из текущей сессии эксперта
             session = self.active_sessions.get(expert_id)
@@ -580,7 +584,7 @@ class ExpertInteractionService:
             # Получаем новости, которые прокомментировал эксперт
             from models.database import News
             approved_news = []
-            with database_service.db_service.get_session() as db_session:
+            with database_service.get_session() as db_session:
                 for news_id in session.news_ids:
                     news = db_session.query(News).filter(News.id == news_id).first()
                     if news:
@@ -605,7 +609,7 @@ class ExpertInteractionService:
             )
             
             # Отправляем на согласование кураторам
-            curator_chat_id = "-1002983482030"
+            curator_chat_id = config.telegram.curator_chat_id
             
             # Используем переданный CuratorApprovalService или создаем новый
             if self.curator_approval_service:
@@ -628,7 +632,7 @@ class ExpertInteractionService:
                     logger.warning(f"⚠️ Не удалось получить bot_instance: {e}")
                 
                 approval_service = CuratorApprovalService(
-                    bot_token="8195833718:AAGbqnbZz7NrbOWN5ic5k7oxGMUTntgHE6s",
+                    bot_token=config.telegram.bot_token,
                     curator_chat_id=curator_chat_id,
                     formatter_service=formatter_service,
                     bot_instance=bot_instance
@@ -704,7 +708,7 @@ class ExpertInteractionService:
     async def _alert_curators_about_unresponsive_expert(self, expert_id: int):
         """Уведомляет кураторов о неотзывчивом эксперте."""
         try:
-            curators_chat_id = "-1002983482030"
+            curators_chat_id = config.telegram.curator_chat_id
             
             session = self.active_sessions.get(expert_id)
             if not session:

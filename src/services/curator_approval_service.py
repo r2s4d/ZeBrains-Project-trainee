@@ -13,6 +13,8 @@ CuratorApprovalService - сервис для согласования дайдж
 - Интеграция с системой публикации
 """
 
+from src.config import config
+
 import asyncio
 import logging
 import aiohttp
@@ -48,8 +50,8 @@ class CuratorApprovalService:
         self.bot_instance = bot_instance
         
         # Настройки
-        self.max_message_length = 4096
-        self.approval_timeout = 3600  # 1 час на согласование
+        self.max_message_length = config.message.max_digest_length
+        self.approval_timeout = config.timeout.approval_timeout
         
         # Хранение текущего дайджеста для публикации
         self.current_digest_text = None
@@ -141,7 +143,7 @@ class CuratorApprovalService:
                 "parse_mode": "Markdown"
             }
             
-            connector = aiohttp.TCPConnector(ssl=False)
+            connector = aiohttp.TCPConnector(ssl=True)
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=params) as response:
                     if response.status == 200:
@@ -217,7 +219,7 @@ class CuratorApprovalService:
                 "reply_markup": keyboard
             }
             
-            connector = aiohttp.TCPConnector(ssl=False)
+            connector = aiohttp.TCPConnector(ssl=True)
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=params) as response:
                     if response.status == 200:
@@ -530,7 +532,7 @@ class CuratorApprovalService:
                 "reply_markup": keyboard
             }
             
-            connector = aiohttp.TCPConnector(ssl=False)
+            connector = aiohttp.TCPConnector(ssl=True)
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=params) as response:
                     if response.status == 200:
@@ -562,73 +564,3 @@ class CuratorApprovalService:
                 "error": str(e)
             }
     
-    async def _send_final_approval_buttons(self) -> Dict[str, Any]:
-        """
-        Отправляет кнопки финального одобрения.
-        
-        Returns:
-            Результат отправки
-        """
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            
-            message_text = """
-**📋 Исправленный дайджест готов!**
-
-Пожалуйста, проверьте исправления и выберите действие:
-
-✅ **Одобрить** - дайджест будет опубликован в канал
-🔄 **Еще раз отредактировать** - продолжить редактирование
-            """
-            
-            # Создаем inline клавиатуру
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "✅ Одобрить",
-                            "callback_data": "approve_edited_digest"
-                        },
-                        {
-                            "text": "🔄 Еще раз отредактировать",
-                            "callback_data": "edit_digest_again"
-                        }
-                    ]
-                ]
-            }
-            
-            params = {
-                "chat_id": self.curator_chat_id,
-                "text": message_text,
-                "parse_mode": "Markdown",
-                "reply_markup": keyboard
-            }
-            
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(url, json=params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result.get("ok"):
-                            return {
-                                "success": True,
-                                "message_id": result["result"]["message_id"]
-                            }
-                        else:
-                            error_msg = result.get("description", "Неизвестная ошибка")
-                            return {
-                                "success": False,
-                                "error": f"Telegram API: {error_msg}"
-                            }
-                    else:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"HTTP {response.status}: {error_text}"
-                        }
-        
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }

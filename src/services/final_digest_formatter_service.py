@@ -18,6 +18,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 from src.models.database import News, Comment, Expert
+from src.config import config
 from src.services.ai_analysis_service import AIAnalysisService
 
 # Настройка логирования
@@ -109,7 +110,7 @@ class FinalDigestFormatterService:
         # Определяем эмодзи на основе тем новостей
         emoji = self._get_title_emoji(news_items)
         
-        # Создаем заголовок (можно улучшить с помощью AI)
+        # Создаем заголовок
         title = "ИИ меняет мир: главные новости недели"
         
         # Форматируем по ТЗ (жирный шрифт в Telegram)
@@ -246,17 +247,19 @@ class FinalDigestFormatterService:
         Returns:
             Отформатированная новость
         """
-        # Базовый текст новости с правильным саммари
-        if hasattr(news, 'summary') and news.summary:
-            # Если есть готовое саммари, проверяем его длину (максимум 100 слов)
-            words = news.summary.split()
-            if len(words) > 100:
-                summary = self._create_ai_summary(news, news.summary)
-            else:
-                summary = news.summary
+        # Используем готовое саммари из БД (ai_summary)
+        if hasattr(news, 'ai_summary') and news.ai_summary:
+            # Используем готовое саммари из БД
+            summary = news.ai_summary
+            logger.info(f"✅ Используем готовое саммари из БД для новости: {news.title[:50]}...")
+        elif hasattr(news, 'summary') and news.summary:
+            # Fallback: используем старое саммари
+            summary = news.summary
+            logger.info(f"⚠️ Используем fallback саммари для новости: {news.title[:50]}...")
         else:
-            # Создаем саммари с помощью AI (максимум 100 слов)
+            # Последний fallback: создаем саммари с помощью AI
             summary = self._create_ai_summary(news)
+            logger.warning(f"⚠️ Создаем новое саммари с помощью AI для новости: {news.title[:50]}...")
         
         news_text = f"{index}. {news.title}\n{summary}"
         
@@ -528,7 +531,7 @@ class FinalDigestFormatterService:
             logger.error(f"❌ Ошибка проверки грамматики: {e}")
             return text  # Возвращаем исходный текст при ошибке
     
-    def split_digest_message(self, digest: str, max_length: int = 4096) -> List[str]:
+    def split_digest_message(self, digest: str, max_length: int = None) -> List[str]:
         """
         Разделяет длинный дайджест на части для отправки в Telegram.
         
@@ -541,6 +544,9 @@ class FinalDigestFormatterService:
         Returns:
             Список частей дайджеста
         """
+        if max_length is None:
+            max_length = config.message.max_digest_length
+        
         if len(digest) <= max_length:
             return [digest]
         

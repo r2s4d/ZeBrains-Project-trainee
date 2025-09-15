@@ -2,18 +2,10 @@
 NewsParserService - сервис для автоматического парсинга новостей из Telegram-каналов.
 
 Этот сервис:
-1. Парсит все источники новостей каждые 2 часа (активные часы) и 4 часа (ночные)
-2. Анализирует важность новостей с помощью AI
-3. Объединяет дубликаты с уникальными индексами
-4. Автоматически создает задания для кураторов и экспертов
-5. Интегрируется с существующей системой
+1. Парсит все источники новостей каждый час (активные часы) и 4 часа (ночные)
+2. Объединяет дубликаты с уникальными индексами # придумать логику поумнее
+3. Интегрируется с существующей системой
 
-Архитектурные решения:
-- Dependency Injection для тестируемости
-- Асинхронная работа для эффективности
-- AI-анализ для определения важности
-- Система объединения дубликатов
-- Реальный парсинг Telegram каналов через Telethon
 """
 
 import asyncio
@@ -23,9 +15,6 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from src.services.postgresql_database_service import PostgreSQLDatabaseService
-from src.services.curator_service import CuratorService
-from src.services.real_expert_service import RealExpertService
-# from src.services.openai_service import OpenAIService  # Удален, используем AIAnalysisService
 from src.services.telegram_channel_parser import TelegramChannelParser
 from src.services.ai_analysis_service import AIAnalysisService
 from src.models.database import Source, News, NewsSource
@@ -42,8 +31,6 @@ class ParsedNews:
     url: Optional[str]
     published_at: datetime
     source_id: int
-    importance_score: float  # 1-10 баллов
-    importance_category: str  # "critical", "important", "interesting", "minor"
     ai_summary: str  # Краткое AI-описание важности
 
 class NewsParserService:
@@ -51,9 +38,9 @@ class NewsParserService:
     Сервис для автоматического парсинга новостей из Telegram-каналов.
     
     Принципы работы:
-    1. Парсит все источники каждые 2 часа (активные часы) и 4 часа (ночные)
+    1. Парсит все источники каждый час (днем) и 4 часа (ночью)
     2. Использует AI для анализа важности
-    3. Объединяет дубликаты с множественными источниками
+    3. Объединяет дубликаты с множественными источниками # глубже продумать логику.
     4. Создает задания для кураторов и экспертов
     5. Реальный парсинг через Telegram API
     """
@@ -61,9 +48,6 @@ class NewsParserService:
     def __init__(
         self, 
         database_service: PostgreSQLDatabaseService,
-        curator_service: CuratorService,
-        expert_service: RealExpertService,
-        openai_service=None,  # Больше не используется
         ai_analysis_service: AIAnalysisService = None
     ):
         """
@@ -71,15 +55,9 @@ class NewsParserService:
         
         Args:
             database_service: Сервис для работы с базой данных PostgreSQL
-            curator_service: Сервис для работы с кураторами
-            expert_service: Сервис для работы с экспертами
-            openai_service: Сервис для AI-анализа (устаревший, не используется)
-            ai_analysis_service: Новый сервис для AI-анализа
+            ai_analysis_service: Сервис для AI-анализа
         """
         self.db = database_service
-        self.curator = curator_service
-        self.expert = expert_service
-        self.openai = None  # Больше не используется
         self.ai_analysis = ai_analysis_service
         
         # Инициализируем Telegram парсер
@@ -87,7 +65,7 @@ class NewsParserService:
         logger.info("📱 TelegramChannelParser будет инициализирован при первом использовании")
         
         # Настройки парсинга (согласно функциональным требованиям)
-        self.parse_interval_active = 2  # часа (активные часы 9:00-21:00)
+        self.parse_interval_active = 1  # часа (активные часы 9:00-21:00)
         self.parse_interval_night = 4   # часа (ночные часы 21:00-9:00)
         self.max_news_per_source = 50  # максимум новостей за раз
         self.max_total_news = 200      # максимум общих новостей за один парсинг
@@ -210,8 +188,8 @@ class NewsParserService:
                 )
                 logger.info(f"📱 Получено {len(news_data)} новостей из @{channel_username}")
             else:
-                logger.warning("⚠️ TelegramChannelParser не инициализирован, используем Mock данные")
-                news_data = self._generate_mock_news_for_source(source)
+                logger.warning("⚠️ TelegramChannelParser не инициализирован, пропускаем парсинг")
+                return 0
             
             processed_count = 0
             
@@ -232,7 +210,7 @@ class NewsParserService:
                         )
                         logger.info(f"🔄 Объединили дубликат: {news_data_item['title']}")
                     else:
-                        # Создаем простую новость без анализа важности
+                        # Создаем простую новость 
                         news = await self._create_simple_news_from_parsed(
                             news_data_item, 
                             source.id
@@ -253,10 +231,6 @@ class NewsParserService:
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга канала {source.telegram_id}: {e}")
             return 0
-    
-    # Метод _analyze_news_importance удален - больше не нужен
-    
-    # Методы анализа важности удалены - больше не нужны
     
     def _detect_duplicates(self, title: str, content: str) -> Dict[str, any]:
         """
@@ -362,7 +336,6 @@ class NewsParserService:
     ) -> Optional[News]:
         """
         Создает простую новость в базе данных из распарсенных данных Telegram.
-        Без AI анализа важности и категорий - только базовые поля.
         
         Args:
             news_data: Данные новости из Telegram
@@ -386,13 +359,7 @@ class NewsParserService:
                 source_url=news_data.get("source_url"),
                 raw_content=news_data.get("raw_content"),
                 # Базовые значения без AI анализа
-                ai_summary=None,
-                importance_score="5",  # Базовый балл
-                category="Искусственный интеллект",  # Базовая категория
-                tags="ИИ, Технологии",  # Базовые теги
-                potential_impact=None,
-                tone=None,
-                ai_analyzed_at=None
+                ai_summary=None
             )
             
             # Добавляем в базу данных
@@ -419,141 +386,5 @@ class NewsParserService:
             logger.error(f"❌ Ошибка создания новости из Telegram: {e}")
             return None
     
-    async def _assign_to_curator(self, news_id: int):
-        """
-        Назначает новость куратору на проверку.
-        
-        Args:
-            news_id: ID новости для назначения
-        """
-        try:
-            # Получаем доступных кураторов
-            curators = self.curator.get_all_curators()
-            
-            if not curators:
-                logger.warning("⚠️ Нет доступных кураторов для назначения")
-                return
-            
-            # TODO: Реализовать логику выбора куратора
-            # Пока назначаем первому доступному
-            selected_curator = curators[0]
-            
-            # Обновляем статус новости
-            with self.db.get_session() as session:
-                news = session.query(News).filter(News.id == news_id).first()
-                if news:
-                    news.status = "pending_curation"
-                    news.curator_id = selected_curator.telegram_id
-                    news.curated_at = datetime.utcnow()
-                    session.commit()
-            
-            logger.info(f"✅ Новость {news_id} назначена куратору {selected_curator.name}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка назначения куратору: {e}")
     
-    def _generate_mock_news_for_source(self, source: Source) -> List[Dict]:
-        """
-        Генерирует Mock новости для демонстрации работы парсера.
-        
-        В реальной версии здесь будет парсинг Telegram-канала.
-        """
-        mock_news = [
-            {
-                "title": "OpenAI анонсировал GPT-5 с революционными возможностями",
-                "content": "OpenAI представил новую версию GPT-5, которая превосходит GPT-4 по всем параметрам...",
-                "url": f"https://t.me/{source.telegram_id}/123",
-                "published_at": datetime.utcnow() - timedelta(hours=2)
-            },
-            {
-                "title": "Google представил новую модель PaLM 3",
-                "content": "Google анонсировал PaLM 3 - улучшенную версию языковой модели...",
-                "url": f"https://t.me/{source.telegram_id}/124",
-                "published_at": datetime.utcnow() - timedelta(hours=1)
-            },
-            {
-                "title": "Новый курс по машинному обучению от MIT",
-                "content": "MIT запустил бесплатный курс по машинному обучению для начинающих...",
-                "url": f"https://t.me/{source.telegram_id}/125",
-                "published_at": datetime.utcnow() - timedelta(minutes=30)
-            }
-        ]
-        
-        return mock_news
     
-    async def manual_parse_source(self, source_telegram_id: str) -> Dict[str, any]:
-        """
-        Ручной запуск парсинга конкретного источника.
-        
-        Используется для тестирования и отладки.
-        
-        Args:
-            source_telegram_id: Telegram ID источника
-            
-        Returns:
-            Dict с результатами парсинга
-        """
-        logger.info(f"🔍 Ручной парсинг источника: {source_telegram_id}")
-        
-        try:
-            # Находим источник
-            source = self.db.get_source_by_telegram_id(source_telegram_id)
-            if not source:
-                return {
-                    "success": False,
-                    "error": f"Источник {source_telegram_id} не найден"
-                }
-            
-            # Парсим источник
-            news_count = await self.parse_channel(source)
-            
-            return {
-                "success": True,
-                "source_name": source.name,
-                "news_count": news_count,
-                "message": f"Парсинг завершен: найдено {news_count} новостей"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка ручного парсинга: {e}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def get_parsing_statistics(self) -> Dict[str, any]:
-        """
-        Возвращает статистику парсинга.
-        
-        Returns:
-            Dict со статистикой
-        """
-        try:
-            with self.db.get_session() as session:
-                # Общее количество новостей
-                total_news = session.query(News).count()
-                
-                # Новости по статусам
-                new_news = session.query(News).filter(News.status == "new").count()
-                pending_curation = session.query(News).filter(News.status == "pending_curation").count()
-                approved = session.query(News).filter(News.status == "approved").count()
-                rejected = session.query(News).filter(News.status == "rejected").count()
-                
-                # Источники
-                total_sources = session.query(Source).count()
-                
-                return {
-                    "total_news": total_news,
-                    "by_status": {
-                        "new": new_news,
-                        "pending_curation": pending_curation,
-                        "approved": approved,
-                        "rejected": rejected
-                    },
-                    "total_sources": total_sources,
-                    "last_parse": "2024-08-07 15:30:00"  
-                }
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения статистики: {e}")
-            return {"error": str(e)}

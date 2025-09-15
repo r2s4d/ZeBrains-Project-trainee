@@ -1,33 +1,47 @@
-# ==================== НАСТРОЙКИ БАЗЫ ДАННЫХ POSTGRESQL ====================
-DB_USER=egor
-DB_PASSWORD=
+# ===========================================
+# AI NEWS ASSISTANT - ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+# ===========================================
+
+# ==================== БАЗА ДАННЫХ ====================
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=ai_news_assistant
+DB_NAME=ai_news
+DB_USER=postgres
+DB_PASSWORD=your_password_here
 
-# ==================== НАСТРОЙКИ TELEGRAM BOT ====================
-# Получите токен у @BotFather в Telegram
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+# ==================== TELEGRAM ====================
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+CURATOR_CHAT_ID=-1002983482030
+CHANNEL_ID=-1002983482030
 
-# ==================== НАСТРОЙКИ OPENAI ====================
-# Получите API ключ на https://platform.openai.com/
-OPENAI_API_KEY=your_openai_api_key_here
+# ==================== AI СЕРВИСЫ ====================
+PROXY_API_KEY=your_proxy_api_key_here
+PROXY_URL=https://openai.api.proxyapi.ru/v1
+AI_MODEL=openai/gpt-5-mini-2025-08-07
 
-# ==================== НАСТРОЙКИ REDIS (ДЛЯ КЭШИРОВАНИЯ) ====================
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=0
+# ==================== БЕЗОПАСНОСТЬ ====================
+SSL_VERIFY=true
+USE_HTTPS=true
 
-# ==================== НАСТРОЙКИ ПРИЛОЖЕНИЯ ====================
-DEBUG=True
-LOG_LEVEL=INFO
+# ==================== ТАЙМАУТЫ ====================
+APPROVAL_TIMEOUT=3600
+REMINDER_INTERVAL=3600
+CURATOR_ALERT_THRESHOLD=14400
+NEWS_PARSING_INTERVAL=1
 
-# ==================== ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ ====================
-# ID администраторов бота (через запятую)
-ADMIN_USER_IDS=123456789,987654321
+# ==================== СООБЩЕНИЯ ====================
+MAX_MESSAGE_LENGTH=4096
+MAX_PHOTO_CAPTION_LENGTH=1024
+MAX_DIGEST_LENGTH=4096
+MAX_NEWS_LIST_LENGTH=3500
+MAX_EXPERT_MESSAGE_LENGTH=3500
+SPLIT_MESSAGE_LENGTH=1024
 
-# Канал для публикации новостей
-NEWS_CHANNEL_ID=@your_news_channel
+# ==================== ЭКСПЕРТЫ ====================
+TEST_EXPERT_TELEGRAM_ID=1326944316
+TEST_EXPERT_NAME=Я (тестовый эксперт)
+TEST_EXPERT_SPECIALIZATION=Тестирование
 
-# Максимальное количество новостей для обработки за раз
-MAX_NEWS_PER_BATCH=10 
+# ==================== AI АНАЛИЗ ====================
+AI_MAX_CONTENT_LENGTH=1000
+AI_MAX_ANALYSIS_LENGTH=3500

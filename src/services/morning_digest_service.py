@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import asyncio
 from telegram import InlineKeyboardButton
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,6 @@ class DigestNews:
     id: int
     title: str
     summary: str
-    importance_score: int
-    category: str
     source_links: str
     published_at: datetime
     curator_id: Optional[str] = None
@@ -33,8 +32,6 @@ class MorningDigest:
     date: datetime
     news_count: int
     news_items: List[DigestNews]
-    total_importance: float
-    categories: List[str]
     curator_id: Optional[str] = None
 
 class MorningDigestService:
@@ -45,9 +42,7 @@ class MorningDigestService:
     def __init__(self, 
                  database_service,
                  ai_analysis_service,
-                 notification_service,
-                 curator_service,
-                 curators_chat_id: str = "-1002983482030",
+                 curators_chat_id: str = None,
                  expert_selection_service=None,
                  bot=None):
         """
@@ -56,20 +51,18 @@ class MorningDigestService:
         Args:
             database_service: Сервис для работы с базой данных
             ai_analysis_service: Сервис AI анализа
-            notification_service: Сервис уведомлений
             curator_service: Сервис кураторов
             expert_selection_service: Сервис выбора эксперта
             bot: Telegram bot для отправки сообщений
             curators_chat_id: ID чата кураторов
         """
         self.db = database_service
+        self.database_service = database_service  # Добавляем алиас для совместимости
         self.ai_service = ai_analysis_service
-        self.notification = notification_service
-        self.curator_service = curator_service
 
         self.expert_selection_service = expert_selection_service
         self.bot = bot
-        self.curators_chat_id = curators_chat_id
+        self.curators_chat_id = curators_chat_id or config.telegram.curator_chat_id
         
         # Система отслеживания ID сообщений дайджеста в базе данных
         # self.digest_sessions = {}  # Убираем словарь в памяти
@@ -90,7 +83,7 @@ class MorningDigestService:
             logger.info("🌅 Создаем утренний дайджест...")
             
             # Получаем новости за последние 24 часа
-            news_items = await self._get_recent_news(hours=24)
+            news_items = await self._get_recent_news(hours=config.timeout.news_parsing_interval * 24)
             
             if not news_items:
                 logger.info("📭 Новостей за последние 24 часа не найдено")
@@ -98,20 +91,19 @@ class MorningDigestService:
             
             # Создаем краткие саммари для каждой новости
             digest_news = []
-            total_importance = 0
-            categories = set()
             
             for news in news_items:
                 # Создаем краткое саммари (используем AI или fallback)
                 summary = await self._create_news_summary(news)
+                
+                # Сохраняем саммари в БД
+                await self._save_summary_to_db(news.id, summary)
                 
                 # Создаем объект для дайджеста
                 digest_item = DigestNews(
                     id=news.id,
                     title=news.title,
                     summary=summary,
-                    importance_score=news.importance_score or 5,
-                    category=news.category or "Общие",
                     source_links=news.source_url or "",
                     published_at=news.published_at or news.created_at,
                     curator_id=news.curator_id
@@ -121,19 +113,12 @@ class MorningDigestService:
                 logger.info(f"📰 Создан элемент дайджеста: ID={news.id}, Title='{news.title[:50]}...'")
                     
                 digest_news.append(digest_item)
-                total_importance += digest_item.importance_score
-                categories.add(digest_item.category)
-            
-            # Сортируем по важности (от высокой к низкой)
-            digest_news.sort(key=lambda x: x.importance_score, reverse=True)
             
             # Создаем дайджест
             digest = MorningDigest(
                 date=datetime.now(),
                 news_count=len(digest_news),
                 news_items=digest_news,
-                total_importance=total_importance / len(digest_news) if digest_news else 0,
-                categories=list(categories),
                 curator_id=curator_id
             )
             
@@ -144,17 +129,21 @@ class MorningDigestService:
             logger.error(f"❌ Ошибка создания дайджеста: {e}")
             return self._create_empty_digest()
     
-    async def _get_recent_news(self, hours: int = 24) -> List[Any]:
+    async def _get_recent_news(self, hours: int = None) -> List[Any]:
         """
         Получает новости за последние N часов с AI-фильтрацией по релевантности.
         
         Args:
-            hours: Количество часов для поиска
+            hours: Количество часов для поиска (по умолчанию из конфигурации)
             
         Returns:
             List: Список отфильтрованных новостей
         """
         try:
+            # Используем значение по умолчанию из конфигурации если не указано
+            if hours is None:
+                hours = config.timeout.news_parsing_interval * 24
+            
             # Вычисляем время начала периода
             start_time = datetime.now() - timedelta(hours=hours)
             
@@ -254,30 +243,34 @@ class MorningDigestService:
     
     async def _create_news_summary(self, news: Any) -> str:
         """
-        Создает краткое саммари для новости.
+        Создает краткое саммари для новости с помощью AI согласно ТЗ.
         
         Args:
             news: Объект новости
             
         Returns:
-            str: Краткое саммари
+            str: Краткое саммари (50-100 слов)
         """
         try:
-            # Пытаемся использовать AI сервис
+            # Используем AI сервис для генерации саммари согласно ТЗ
             if self.ai_service:
                 try:
-                    # Анализируем новость через AI
-                    analysis = await self.ai_service.analyze_news(
+                    # Генерируем саммари с помощью AI
+                    summary = await self.ai_service.generate_summary_only(
                         title=news.title,
-                        content=news.content,
-                        source_links=news.source_url or ""
+                        content=news.content
                     )
                     
-                    if analysis and hasattr(analysis, 'summary') and analysis.summary:
-                        return analysis.summary
-                    
+                    if summary and summary.strip():
+                        logger.info(f"✅ AI саммари создано для новости: {news.title[:50]}...")
+                        return summary.strip()
+                    else:
+                        logger.warning("⚠️ AI вернул пустое саммари, используем fallback")
+                        
                 except Exception as e:
-                    logger.warning(f"⚠️ AI анализ не удался, используем fallback: {e}")
+                    logger.warning(f"⚠️ AI генерация не удалась, используем fallback: {e}")
+            else:
+                logger.warning("⚠️ AI сервис недоступен, используем fallback")
             
             # Fallback: создаем простое саммари
             return self._create_fallback_summary(news)
@@ -285,6 +278,31 @@ class MorningDigestService:
         except Exception as e:
             logger.error(f"❌ Ошибка создания саммари: {e}")
             return self._create_fallback_summary(news)
+    
+    async def _save_summary_to_db(self, news_id: int, summary: str) -> None:
+        """
+        Сохраняет саммари в базу данных.
+        
+        Args:
+            news_id: ID новости
+            summary: Саммари для сохранения
+        """
+        try:
+            if self.database_service:
+                with self.database_service.get_session() as session:
+                    from src.models.database import News
+                    
+                    # Находим новость и обновляем саммари
+                    news = session.query(News).filter(News.id == news_id).first()
+                    if news:
+                        news.ai_summary = summary
+                        session.commit()
+                        logger.info(f"✅ Саммари сохранено в БД для новости {news_id}")
+                    else:
+                        logger.warning(f"⚠️ Новость {news_id} не найдена в БД")
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения саммари в БД: {e}")
     
     def _create_fallback_summary(self, news: Any) -> str:
         """
@@ -385,8 +403,6 @@ class MorningDigestService:
                 formatted_digest += f"""
 <b>{i}. {news.title}</b>
 📝 {news.summary}
-⭐ Важность: {news.importance_score}/10
-🏷️ Категория: {news.category}
 ➡️ Источник: {news.source_links}
 
 <code>Команды для модерации:</code>
@@ -463,7 +479,7 @@ class MorningDigestService:
             message_text, buttons = self.create_interactive_digest_message(digest)
             
             # Проверяем длину сообщения (Telegram лимит: 4096 символов)
-            max_length = 4000  # Оставляем запас для HTML тегов
+            max_length = config.message.max_digest_length - 100  # Оставляем запас для HTML тегов
             
             if len(message_text) <= max_length:
                 # Сообщение короткое, отправляем как есть
@@ -496,15 +512,14 @@ class MorningDigestService:
             from telegram import InlineKeyboardMarkup
             reply_markup = InlineKeyboardMarkup(buttons)
             
-            # Очищаем текст от неправильных HTML тегов
+            # Очищаем текст от неправильных HTML тегов, но сохраняем ссылки
             cleaned_text = self._clean_html_text(message_text)
             
             if self.bot:
                 message = await self.bot.send_message(
                     chat_id=chat_id,
                     text=cleaned_text,
-                    reply_markup=reply_markup,
-                    parse_mode=None
+                    reply_markup=reply_markup
                 )
                 logger.info(f"✅ Сообщение отправлено через bot")
                 
@@ -513,13 +528,7 @@ class MorningDigestService:
                     self._save_digest_session(chat_id, [message.message_id], 0)
                     logger.info(f"💾 Сохранена сессия для одиночного сообщения: {message.message_id}")
             else:
-                # Fallback через notification service (без кнопок)
-                await self.notification.send_telegram_message(
-                    chat_id=chat_id,
-                    message=message_text,
-                    parse_mode="HTML"
-                )
-                logger.info(f"✅ Сообщение отправлено через notification service (без кнопок)")
+                logger.error("❌ Bot недоступен, сообщение не отправлено")
             
             return True
             
@@ -581,13 +590,12 @@ class MorningDigestService:
                 if part_buttons:
                     if self.bot:
                         from telegram import InlineKeyboardMarkup
-                        # Очищаем текст от неправильных HTML тегов
+                        # Очищаем текст от неправильных HTML тегов, но сохраняем ссылки
                         cleaned_text = self._clean_html_text(part['text'])
                         message = await self.bot.send_message(
                             chat_id=chat_id,
                             text=cleaned_text,
-                            reply_markup=InlineKeyboardMarkup(part_buttons),
-                            parse_mode=None
+                            reply_markup=InlineKeyboardMarkup(part_buttons)
                         )
                         message_ids.append(message.message_id)
                         logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} с {len(part_buttons)} кнопками")
@@ -596,21 +604,16 @@ class MorningDigestService:
                 else:
                     # Отправляем без кнопок
                     if self.bot:
-                        # Очищаем текст от неправильных HTML тегов
+                        # Очищаем текст от неправильных HTML тегов, но сохраняем ссылки
                         cleaned_text = self._clean_html_text(part['text'])
                         message = await self.bot.send_message(
                             chat_id=chat_id,
-                            text=cleaned_text,
-                            parse_mode=None
+                            text=cleaned_text
                         )
                         message_ids.append(message.message_id)
                         logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} без кнопок")
                     else:
-                        await self.notification.send_telegram_message(
-                            chat_id=chat_id,
-                            message=part['text'],
-                            parse_mode="HTML"
-                        )
+                        logger.error("❌ Bot недоступен, часть дайджеста не отправлена")
             
             # Сохраняем ID всех сообщений дайджеста в сессии
             if message_ids:
@@ -628,18 +631,24 @@ class MorningDigestService:
 
     def _clean_html_text(self, text: str) -> str:
         """
-        Очищает текст от HTML тегов и добавляет переносы строк для читаемости.
+        Очищает текст от всех HTML тегов, кроме ссылок, и исправляет неправильные теги.
         
         Args:
             text: Исходный текст
             
         Returns:
-            str: Очищенный текст с переносами строк
+            str: Очищенный текст с правильными HTML тегами
         """
         import re
         
+        # Сначала исправляем неправильные теги типа <2>, <3>, <2,> и т.д.
+        text = re.sub(r'<\d+[^>]*>', '', text)
+        
         # Удаляем все HTML теги
         text = re.sub(r'<[^>]*>', '', text)
+        
+        # Удаляем оставшиеся символы < и > которые могли остаться
+        text = re.sub(r'[<>]', '', text)
         
         # Добавляем переносы строк для читаемости
         # После точек, восклицательных и вопросительных знаков
@@ -685,7 +694,7 @@ class MorningDigestService:
         
         return text
     
-    def _split_message_by_news(self, digest: MorningDigest, max_length: int = 3500) -> list:
+    def _split_message_by_news(self, digest: MorningDigest, max_length: int = None) -> list:
         """
         Разбивает дайджест на части по новостям, чтобы не разрывать новости посередине.
         
@@ -698,6 +707,9 @@ class MorningDigestService:
         """
         if not digest.news_items:
             return []
+        
+        if max_length is None:
+            max_length = config.message.max_news_list_length
         
         parts = []
         current_part = ""
@@ -836,8 +848,10 @@ class MorningDigestService:
         try:
             logger.info(f"📤 Отправляем дайджест куратору {curator_id}...")
             
-            # Получаем куратора
-            curator = await self.curator_service.get_curator_by_id(curator_id)
+            # Получаем куратора из БД
+            with self.database_service.get_session() as session:
+                from src.models.database import Curator
+                curator = session.query(Curator).filter(Curator.id == curator_id).first()
             
             if not curator:
                 logger.error(f"❌ Куратор {curator_id} не найден")
@@ -860,12 +874,7 @@ class MorningDigestService:
                 )
                 logger.info(f"✅ Интерактивный дайджест отправлен куратору {curator.name} через bot")
             else:
-                await self.notification.send_telegram_message(
-                    chat_id=curator.telegram_id,
-                    message=message_text,
-                    parse_mode="HTML"
-                )
-                logger.info(f"✅ Дайджест отправлен куратору {curator.name} через notification service (без кнопок)")
+                logger.error("❌ Bot недоступен, дайджест не отправлен куратору")
             
             return True
             
@@ -879,8 +888,6 @@ class MorningDigestService:
             date=datetime.now(),
             news_count=0,
             news_items=[],
-            total_importance=0,
-            categories=[],
             curator_id=None
         )
     
@@ -893,23 +900,20 @@ class MorningDigestService:
         """
         try:
             # Получаем новости за разные периоды
-            last_24h = await self._get_recent_news(hours=24)
-            last_7d = await self._get_recent_news(hours=24*7)
-            last_30d = await self._get_recent_news(hours=24*30)
+            last_24h = await self._get_recent_news(hours=config.timeout.news_parsing_interval * 24)
+            last_7d = await self._get_recent_news(hours=config.timeout.news_parsing_interval * 24 * 7)
+            last_30d = await self._get_recent_news(hours=config.timeout.news_parsing_interval * 24 * 30)
             
             # Собираем статистику
             stats = {
                 "last_24h": {
-                    "count": len(last_24h),
-                    "avg_importance": sum(n.importance_score or 5 for n in last_24h) / len(last_24h) if last_24h else 0
+                    "count": len(last_24h)
                 },
                 "last_7d": {
-                    "count": len(last_7d),
-                    "avg_importance": sum(n.importance_score or 5 for n in last_7d) / len(last_7d) if last_7d else 0
+                    "count": len(last_7d)
                 },
                 "last_30d": {
-                    "count": len(last_30d),
-                    "avg_importance": sum(n.importance_score or 5 for n in last_30d) / len(last_30d) if last_30d else 0
+                    "count": len(last_30d)
                 }
             }
             
@@ -930,15 +934,15 @@ class MorningDigestService:
             tuple: (текст сообщения, список inline кнопок)
         """
         if not digest.news_items:
-            return "📭 <b>Новостей для модерации не найдено</b>", []
+            return "📭 Новостей для модерации не найдено", []
         
         # Заголовок дайджеста
         header = f"""
-🌅 <b>УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ</b>
+🌅 УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ
 📅 Дата: {digest.date.strftime('%d.%m.%Y')}
 📰 Всего новостей: {digest.news_count}
 
-<b>📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:</b>
+📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:
 """
         
         # Список новостей
@@ -946,15 +950,15 @@ class MorningDigestService:
         for i, news in enumerate(digest.news_items, 1):
             post_link = self._generate_post_link(news)
             news_list += f"""
-<b>{i}. {news.title}</b>
+{i}. {news.title}
 📝 {news.summary}
-➡️ <a href="{post_link}">Источник</a>
+➡️ Источник: {post_link}
 
 """
         
         # Инструкции
         footer = """
-<b>💡 ИНСТРУКЦИИ:</b>
+on💡 ИНСТРУКЦИИ:
 • Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
 • После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
 """
@@ -1259,15 +1263,13 @@ if __name__ == "__main__":
     
     mock_db = Mock()
     mock_ai = Mock()
-    mock_notification = Mock()
-    mock_curator = Mock()
+    mock_bot = Mock()
     
     # Создаем сервис
     service = MorningDigestService(
         database_service=mock_db,
         ai_analysis_service=mock_ai,
-        notification_service=mock_notification,
-        curator_service=mock_curator
+        bot=mock_bot
     )
     
     print("✅ MorningDigestService создан успешно")

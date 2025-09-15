@@ -52,12 +52,6 @@ class News(Base):
     
     # Поля для AI анализа
     ai_summary = Column(Text, nullable=True)  # AI-генерированное саммари
-    importance_score = Column(String, nullable=True)  # Оценка важности (0.0-1.0)
-    category = Column(String, nullable=True)  # Категория новости
-    tags = Column(Text, nullable=True)  # Теги (JSON строка)
-    potential_impact = Column(Text, nullable=True)  # Оценка потенциального влияния
-    tone = Column(String, nullable=True)  # Тональность новости
-    ai_analyzed_at = Column(DateTime, nullable=True)  # Когда был выполнен AI анализ
 
     def __repr__(self):
         # Метод для красивого отображения объекта News при печати
@@ -243,7 +237,7 @@ class DigestSession(Base):
         return f"<DigestSession(id={self.id}, chat_id='{self.chat_id}', news_count={self.news_count}, is_active={self.is_active})>"
 
 # Пояснения к модели DigestSession:
-# - chat_id — ID чата в Telegram (например, "-1002983482030")
+# - chat_id — ID чата в Telegram (например, "-1001234567890")
 # - message_ids — JSON строка с массивом ID сообщений (например, "[237, 238, 239, 240]")
 # - news_count — количество новостей в дайджесте
 # - created_at — когда сессия была создана

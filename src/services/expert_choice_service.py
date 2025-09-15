@@ -8,6 +8,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from telegram import InlineKeyboardButton
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class ExpertChoiceService:
             Expert(id=1, name="Рамиль Зайнеев", specialization="AI/ML", is_test=False),
             Expert(id=2, name="Станислав Маслов", specialization="Разработка", is_test=False),
             Expert(id=3, name="Степан Игонин", specialization="Аналитика", is_test=False),
-            Expert(id=4, name="Я (тестовый эксперт)", specialization="Тестирование", telegram_id="1326944316", is_test=True)
+            Expert(id=4, name=config.expert.test_expert_name, specialization=config.expert.test_expert_specialization, telegram_id=config.expert.test_expert_telegram_id, is_test=True)
         ]
         
         logger.info("✅ ExpertChoiceService инициализирован")
@@ -87,15 +88,3 @@ class ExpertChoiceService:
                 return expert
         return None
     
-    def is_test_expert(self, expert_id: int) -> bool:
-        """
-        Проверяет, является ли эксперт тестовым.
-        
-        Args:
-            expert_id: ID эксперта
-            
-        Returns:
-            bool: True если тестовый эксперт
-        """
-        expert = self.get_expert_by_id(expert_id)
-        return expert.is_test if expert else False

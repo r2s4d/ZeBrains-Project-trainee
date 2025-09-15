@@ -12,17 +12,12 @@ load_dotenv()
 # Импортируем все модели из файла database.py
 from src.models.database import Base, Source, News, NewsSource, Curator, Expert, Summary, Comment, Post
 
-# Настройки подключения к базе данных PostgreSQL
-# Получаем параметры из переменных окружения (файл .env)
-DB_USER = os.getenv('DB_USER', 'egor')  # Имя пользователя базы данных
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'password')  # Пароль от базы данных
-DB_HOST = os.getenv('DB_HOST', 'localhost')  # Адрес сервера базы данных
-DB_PORT = os.getenv('DB_PORT', '5432')  # Порт базы данных (5432 - стандартный для PostgreSQL)
-DB_NAME = os.getenv('DB_NAME', 'ai_news_assistant')  # Название базы данных
+# Импортируем централизованную конфигурацию
+from src.config import config
 
-# Создаем строку подключения к базе данных
+# Создаем строку подключения к базе данных из централизованной конфигурации
 # Формат: postgresql://пользователь:пароль@хост:порт/название_базы
-DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DATABASE_URL = f"postgresql://{config.database.user}:{config.database.password}@{config.database.host}:{config.database.port}/{config.database.name}"
 
 # Создаем движок базы данных (engine)
 # Это основной объект для работы с базой данных
