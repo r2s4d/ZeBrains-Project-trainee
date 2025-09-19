@@ -7,7 +7,7 @@ Telegram бот для AI News Assistant.
 import os
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Добавляем путь к модулям
 import sys
@@ -28,6 +28,7 @@ from src.services.morning_digest_service import MorningDigestService
 from src.services.final_digest_formatter_service import FinalDigestFormatterService
 from src.services.curator_approval_service import CuratorApprovalService
 from src.config import config
+from src.services.bot_session_service import bot_session_service
 from src.services.ai_analysis_service import AIAnalysisService
 from src.services.scheduler_service import SchedulerService
 
@@ -59,11 +60,10 @@ class AINewsBot:
         self.application = Application.builder().token(token).build()
         self.service = PostgreSQLDatabaseService()
         
-        # Состояние ожидания правок дайджеста
-        self.waiting_for_digest_edit = {}  # user_id -> True
+
         
-        # Состояние ожидания фото для публикации
-        self.waiting_for_photo = {}  # user_id -> digest_text
+        # ✅ Используем BotSessionService для управления состояниями
+        self.session_service = bot_session_service
         
         # OpenAI сервис больше не нужен, используем AIAnalysisService
         logger.info("ℹ️ OpenAI сервис отключен, используем AIAnalysisService с ProxyAPI")
@@ -362,7 +362,7 @@ class AINewsBot:
                 ]
                 
                 # Создаем сессию модерации
-                self.interactive_moderation_service.create_moderation_session(
+                await self.interactive_moderation_service.create_moderation_session(
                     user_id=user.id,
                     chat_id=update.effective_chat.id,
                     message_id=update.message.message_id,
@@ -429,13 +429,13 @@ class AINewsBot:
                 return
             
             # Удаляем новость из сессии модерации
-            success = self.interactive_moderation_service.remove_news_from_session(user_id, news_id)
+            success = await self.interactive_moderation_service.remove_news_from_session(user_id, news_id)
             if not success:
                 await query.answer("❌ Не удалось удалить новость")
                 return
             
             # Получаем оставшиеся новости
-            remaining_news = self.interactive_moderation_service.get_remaining_news(user_id)
+            remaining_news = await self.interactive_moderation_service.get_remaining_news(user_id)
             logger.info(f"📋 Оставшиеся новости: {len(remaining_news)}")
             
             # Очищаем сообщения дайджеста (по JSON-сессии)
@@ -504,15 +504,82 @@ class AINewsBot:
             # Очищаем текст от HTML тегов
             cleaned_text = self.morning_digest_service._clean_html_text(message_text)
             
-            # Отправляем новое сообщение вместо редактирования
-            from telegram import InlineKeyboardMarkup
-            reply_markup = InlineKeyboardMarkup(buttons)
+            # Проверяем длину сообщения и разбиваем на части если нужно
+            max_length = 4096  # Лимит Telegram
             
-            # Отправляем новое сообщение в тот же чат
-            await query.message.chat.send_message(
-                text=cleaned_text,
-                reply_markup=reply_markup
-            )
+            if len(cleaned_text) <= max_length:
+                # Сообщение помещается в один пост
+                from telegram import InlineKeyboardMarkup
+                reply_markup = InlineKeyboardMarkup(buttons)
+                
+                message = await query.message.chat.send_message(
+                    text=cleaned_text,
+                    reply_markup=reply_markup
+                )
+                
+                # ВАЖНО: Сохраняем ID нового сообщения в сессию
+                self.morning_digest_service._save_digest_session(
+                    str(query.message.chat.id), 
+                    [message.message_id], 
+                    new_digest.news_count
+                )
+                logger.info(f"💾 Обновлена сессия с новым ID сообщения: {message.message_id}")
+            else:
+                # Сообщение слишком длинное - разбиваем на части
+                logger.info(f"⚠️ Сообщение слишком длинное ({len(cleaned_text)} символов), разбиваем на части")
+                
+                # Разбиваем дайджест на части по новостям
+                parts = self.morning_digest_service._split_message_by_news(new_digest, max_length)
+                
+                # Список для хранения ID всех новых сообщений дайджеста
+                new_message_ids = []
+                
+                # Отправляем каждую часть отдельно
+                for i, part in enumerate(parts):
+                    # Создаем кнопки для текущей части
+                    part_buttons = []
+                    
+                    for news_idx in part['buttons']:
+                        news = new_digest.news_items[news_idx]
+                        if hasattr(news, 'id') and news.id is not None:
+                            button_text = f"🗑️ Удалить {news_idx + 1}"
+                            callback_data = f"remove_news_{news.id}"
+                            from telegram import InlineKeyboardButton
+                            part_buttons.append([
+                                InlineKeyboardButton(button_text, callback_data=callback_data)
+                            ])
+                    
+                    # Добавляем кнопку "Одобрить оставшиеся" только к последней части
+                    if i == len(parts) - 1:
+                        from telegram import InlineKeyboardButton
+                        approve_button = InlineKeyboardButton(
+                            "✅ Одобрить оставшиеся", 
+                            callback_data="approve_remaining"
+                        )
+                        part_buttons.append([approve_button])
+                    
+                    # Отправляем часть с кнопками
+                    if part_buttons:
+                        from telegram import InlineKeyboardMarkup
+                        reply_markup = InlineKeyboardMarkup(part_buttons)
+                        message = await query.message.chat.send_message(
+                            text=part['text'],
+                            reply_markup=reply_markup
+                        )
+                        new_message_ids.append(message.message_id)
+                    else:
+                        # Отправляем без кнопок
+                        message = await query.message.chat.send_message(text=part['text'])
+                        new_message_ids.append(message.message_id)
+                
+                # ВАЖНО: Сохраняем новые ID сообщений в сессию
+                if new_message_ids:
+                    self.morning_digest_service._save_digest_session(
+                        str(query.message.chat.id), 
+                        new_message_ids, 
+                        new_digest.news_count
+                    )
+                    logger.info(f"💾 Обновлена сессия с новыми ID сообщений: {new_message_ids}")
             
             logger.info(f"✅ Новый дайджест создан и отправлен с {len(digest_news)} новостями")
             
@@ -538,19 +605,15 @@ class AINewsBot:
                 await query.answer("❌ Эксперт не найден")
                 return
             
-            logger.info(f"👨‍💼 Эксперт найден: {expert.name}, is_test: {expert.is_test}")
+            logger.info(f"👨‍💼 Эксперт найден: {expert.name}")
             
-            if expert.is_test:
-                # Сохраняем выбранного эксперта как эксперта недели
-                logger.info(f"👨‍💼 Сохраняем эксперта {expert.name} как эксперта недели")
-                self.service.set_expert_of_week(expert.id)
-                
-                # Тестовый эксперт - отправляем новости в личку
-                logger.info(f"👨‍💼 Отправляем новости тестовому эксперту {expert.name}")
-                await self._send_news_to_expert(query, expert, user_id)
-            else:
-                logger.info(f"⚠️ Эксперт {expert.name} пока недоступен")
-                await query.answer("⚠️ Этот эксперт пока недоступен")
+            # Сохраняем выбранного эксперта как эксперта недели
+            logger.info(f"👨‍💼 Сохраняем эксперта {expert.name} как эксперта недели")
+            self.service.set_expert_of_week(expert.id)
+            
+            # Отправляем новости эксперту
+            logger.info(f"👨‍💼 Отправляем новости эксперту {expert.name}")
+            await self._send_news_to_expert(query, expert, user_id)
                 
         except Exception as e:
             logger.error(f"❌ Ошибка при выборе эксперта: {e}")
@@ -573,7 +636,7 @@ class AINewsBot:
                 return
             
             # Получаем одобренные новости из сессии
-            approved_news = self.interactive_moderation_service.get_remaining_news(user_id)
+            approved_news = await self.interactive_moderation_service.get_remaining_news(user_id)
             logger.info(f"📰 Получены одобренные новости: {len(approved_news)} штук")
             
             if not approved_news:
@@ -582,15 +645,15 @@ class AINewsBot:
                 return
             
             # Определяем ID эксперта для отправки
-            if expert.is_test:
-                # Для тестового эксперта используем его Telegram ID
+            try:
+                # Пробуем преобразовать telegram_id в число
                 expert_telegram_id = int(expert.telegram_id)
                 expert_name = expert.name
-                logger.info(f"👨‍💼 Тестовый эксперт: {expert_name}, Telegram ID: {expert_telegram_id}")
-            else:
-                # Для реальных экспертов пока заглушка
-                logger.info(f"⚠️ Реальный эксперт {expert.name} пока не подключен")
-                await query.answer("⚠️ Реальные эксперты пока не подключены")
+                logger.info(f"👨‍💼 Эксперт: {expert_name}, Telegram ID: {expert_telegram_id}")
+            except ValueError:
+                # Если telegram_id не числовой, это username - пока не поддерживается
+                logger.info(f"⚠️ Эксперт {expert.name} имеет username ({expert.telegram_id}) вместо числового ID")
+                await query.answer("⚠️ Этот эксперт пока не подключен (нужен числовой Telegram ID)")
                 return
             
             # Отправляем новости эксперту через новый сервис
@@ -606,7 +669,7 @@ class AINewsBot:
                 
                 # Очищаем сессию модерации после успешной отправки
                 if hasattr(self, 'interactive_moderation_service') and self.interactive_moderation_service:
-                    self.interactive_moderation_service.cleanup_moderation_session(user_id)
+                    await self.interactive_moderation_service.cleanup_moderation_session(user_id)
                     logger.info(f"🧹 Сессия модерации для пользователя {user_id} очищена")
                 
                 # Обновляем сообщение в чате кураторов
@@ -665,23 +728,35 @@ class AINewsBot:
         # Логируем все входящие сообщения для диагностики
         logger.info(f"📨 Получено сообщение от {user.id}: text={bool(text)}, photo={bool(update.message.photo)}, document={bool(update.message.document)}")
         
-        # Проверяем, ожидаем ли мы правки дайджеста от этого пользователя
-        if user.id in self.waiting_for_digest_edit:
+        # ✅ Проверяем состояние ожидания правок в БД
+        digest_edit_session = await self.session_service.get_session_data(
+            session_type='digest_edit',
+            user_id=str(user.id)
+        )
+        if digest_edit_session and digest_edit_session.get('waiting'):
             logger.info(f"📝 Получены правки дайджеста от пользователя {user.id}")
             await self._handle_digest_edit_message(update, user.id, text)
             return
         
-        # Проверяем, ожидаем ли мы фото для публикации от этого пользователя
-        logger.info(f"🔍 Проверка фото: user.id={user.id}, waiting_for_photo={list(self.waiting_for_photo.keys())}, has_photo={bool(update.message.photo)}")
-        if user.id in self.waiting_for_photo and update.message.photo:
+        # ✅ Проверяем состояние ожидания фото в БД
+        photo_waiting_session = await self.session_service.get_session_data(
+            session_type='photo_waiting',
+            user_id=str(user.id)
+        )
+        logger.info(f"🔍 Проверка фото: user.id={user.id}, photo_waiting_session={photo_waiting_session is not None}, has_photo={bool(update.message.photo)}")
+        if photo_waiting_session and update.message.photo:
             logger.info(f"📸 Получено фото для публикации от пользователя {user.id}")
             await self._handle_photo_for_publication(update, user.id)
             return
         
         # Проверяем, является ли пользователь экспертом с активной сессией
         if hasattr(self, 'expert_interaction_service') and self.expert_interaction_service:
-            # Проверяем, есть ли активная сессия для этого пользователя
-            if user.id in self.expert_interaction_service.active_sessions:
+            # Проверяем, есть ли активная сессия эксперта в БД
+            expert_session = await self.session_service.get_session_data(
+                session_type='expert_session',
+                user_id=str(user.id)
+            )
+            if expert_session:
                 # Это комментарий эксперта - обрабатываем его
                 await self._handle_expert_comment(update, user.id, text)
                 return
@@ -693,22 +768,26 @@ class AINewsBot:
                 await update.message.reply_text("❌ Сервис взаимодействия с экспертами недоступен")
                 return
             
-            # Получаем активную сессию эксперта
-            session = self.expert_interaction_service.active_sessions.get(expert_id)
-            if not session:
+            # Получаем активную сессию эксперта из БД
+            session_data = await self.session_service.get_session_data(
+                session_type='expert_session',
+                user_id=str(expert_id)
+            )
+            if not session_data:
                 await update.message.reply_text("❌ Активная сессия не найдена")
                 return
             
             # Определяем, к какой новости относится комментарий
             # Берем новость, которую эксперт выбрал для комментирования
-            if not hasattr(session, 'selected_news_id') or not session.selected_news_id:
+            if not session_data.get('selected_news_id'):
                 await update.message.reply_text("❌ Не выбрана новость для комментирования")
                 return
             
-            news_id = session.selected_news_id
+            news_id = session_data['selected_news_id']
             
             # Проверяем, что новость еще не прокомментирована
-            if news_id in session.commented_news:
+            commented_news = session_data.get('commented_news', [])
+            if news_id in commented_news:
                 await update.message.reply_text("✅ Эта новость уже прокомментирована!")
                 return
             
@@ -716,11 +795,10 @@ class AINewsBot:
             success = await self.expert_interaction_service.save_comment(expert_id, news_id, comment_text)
             
             if success:
-                # Очищаем выбранную новость
-                session.selected_news_id = None
-                
                 # Если есть еще новости для комментирования, показываем обновленный список
-                if len(session.commented_news) < len(session.news_ids):
+                commented_news = set(session_data.get('commented_news', []))
+                news_ids = set(session_data.get('news_ids', []))
+                if len(commented_news) < len(news_ids):
                     await self._show_updated_expert_news_list(expert_id)
                 else:
                     # Все новости прокомментированы - НЕ отправляем сообщение
@@ -739,19 +817,26 @@ class AINewsBot:
             if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
                 return
             
-            session = self.expert_interaction_service.active_sessions.get(expert_id)
-            if not session:
+            # Получаем сессию эксперта из БД
+            session_data = await self.session_service.get_session_data(
+                session_type='expert_session',
+                user_id=str(expert_id)
+            )
+            if not session_data:
                 return
             
             # Получаем оставшиеся новости
-            remaining_news_ids = session.news_ids - session.commented_news
+            news_ids = set(session_data.get('news_ids', []))
+            commented_news = set(session_data.get('commented_news', []))
+            remaining_news_ids = news_ids - commented_news
             
             if not remaining_news_ids:
                 return
             
             # Получаем реальные данные оставшихся новостей из сессии эксперта
             remaining_news = []
-            for news in session.news_items:
+            news_items = session_data.get('news_items', [])
+            for news in news_items:
                 if news['id'] in remaining_news_ids:
                     remaining_news.append(news)
             
@@ -961,6 +1046,9 @@ class AINewsBot:
             
             logger.info("✅ Бот успешно запущен!")
             
+            # ✅ Восстанавливаем активные сессии после запуска
+            await self.restore_sessions_on_startup()
+            
             # Автоматически запускаем планировщик при старте бота
             logger.info(f"🔍 Проверяем SchedulerService: {self.scheduler_service}")
             
@@ -1045,7 +1133,7 @@ class AINewsBot:
                 logger.warning("⚠️ MorningDigestService недоступен для удаления дайджеста")
             
             # Завершаем модерацию и получаем одобренные новости
-            approved_news = self.interactive_moderation_service.complete_moderation(user_id)
+            approved_news = await self.interactive_moderation_service.complete_moderation(user_id)
             logger.info(f"✅ Одобренные новости: {len(approved_news) if approved_news else 0}")
             
             if approved_news:
@@ -1130,7 +1218,7 @@ class AINewsBot:
                 return
             
             # 3. Получаем комментарии экспертов к новостям
-            expert_comments = self.service.get_expert_comments_for_news([news.id for news in approved_news])
+            expert_comments = await self.service.get_expert_comments_for_news([news.id for news in approved_news])
             
             # 4. Получаем источники новостей
             news_sources = self.service.get_news_sources([news.id for news in approved_news])
@@ -1194,9 +1282,14 @@ class AINewsBot:
                 await query.answer("❌ Сервис согласования недоступен")
                 return
             
-            # Устанавливаем состояние ожидания правок
-            self.waiting_for_digest_edit[user_id] = True
-            logger.info(f"🔄 Установлено состояние ожидания правок для пользователя {user_id}")
+            # ✅ Устанавливаем состояние ожидания правок в БД
+            await self.session_service.save_session(
+                session_type='digest_edit',
+                user_id=str(user_id),
+                data={'waiting': True, 'user_id': user_id},
+                expires_at=datetime.now() + timedelta(hours=1)
+            )
+            logger.info(f"🔄 Установлено состояние ожидания правок в БД для пользователя {user_id}")
             
             # Обрабатываем запрос на редактирование через сервис
             result = await self.curator_approval_service.handle_approval("edit_digest", str(user_id))
@@ -1223,10 +1316,12 @@ class AINewsBot:
             result = await self.curator_approval_service.process_edited_digest(text, str(user_id))
             
             if result["success"]:
-                # Убираем состояние ожидания правок
-                if user_id in self.waiting_for_digest_edit:
-                    del self.waiting_for_digest_edit[user_id]
-                    logger.info(f"🔄 Снято состояние ожидания правок для пользователя {user_id}")
+                # ✅ Убираем состояние ожидания правок из БД
+                await self.session_service.delete_session(
+                    session_type='digest_edit',
+                    user_id=str(user_id)
+                )
+                logger.info(f"🔄 Снято состояние ожидания правок из БД для пользователя {user_id}")
                 
                 await update.message.reply_text("✅ Правки обработаны! Исправленный дайджест отправлен на согласование.")
             else:
@@ -1241,10 +1336,18 @@ class AINewsBot:
         try:
             logger.info(f"📸 Обработка фото для публикации от пользователя {user_id}")
             
-            # Получаем digest_text из состояния ожидания
-            digest_text = self.waiting_for_photo.get(user_id)
-            if not digest_text:
+            # ✅ Получаем digest_text из БД
+            photo_session = await self.session_service.get_session_data(
+                session_type='photo_waiting',
+                user_id=str(user_id)
+            )
+            if not photo_session:
                 await update.message.reply_text("❌ Ошибка: не найден текст дайджеста для публикации")
+                return
+            
+            digest_text = photo_session.get('digest_text')
+            if not digest_text:
+                await update.message.reply_text("❌ Ошибка: текст дайджеста поврежден")
                 return
             
             # Получаем file_id самого большого фото
@@ -1275,10 +1378,12 @@ class AINewsBot:
                     parse_mode="HTML"
                 )
                 
-                # Убираем состояние ожидания фото
-                if user_id in self.waiting_for_photo:
-                    del self.waiting_for_photo[user_id]
-                    logger.info(f"🔄 Снято состояние ожидания фото для пользователя {user_id}")
+                # ✅ Убираем состояние ожидания фото из БД
+                await self.session_service.delete_session(
+                    session_type='photo_waiting',
+                    user_id=str(user_id)
+                )
+                logger.info(f"🔄 Снято состояние ожидания фото из БД для пользователя {user_id}")
                 
                 await update.message.reply_text("🎉 Дайджест успешно опубликован в канал с фото!")
                 logger.info(f"✅ Дайджест опубликован в канал")
@@ -1340,9 +1445,12 @@ class AINewsBot:
             from telegram import InlineKeyboardMarkup
             reply_markup = InlineKeyboardMarkup(buttons)
             
-            await query.message.reply_text(
+            # Отправляем новое сообщение в чат кураторов (не ответ на удаленное сообщение)
+            await self.application.bot.send_message(
+                chat_id=config.telegram.curator_chat_id,
                 text=message_text,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                parse_mode="HTML"
             )
             
             logger.info(f"✅ Выбор эксперта показан для пользователя {user_id}")
@@ -1350,6 +1458,172 @@ class AINewsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка показа выбора эксперта: {e}")
             await query.answer("❌ Ошибка при выборе эксперта")
+    
+    async def restore_sessions_on_startup(self):
+        """
+        Восстанавливает активные сессии при запуске бота.
+        Критически важно для устойчивости к перезапускам!
+        """
+        try:
+            logger.info("🔄 Восстановление активных сессий при запуске...")
+            
+            # Получаем все активные сессии из БД
+            active_sessions = await self.session_service.get_active_sessions()
+            
+            if not active_sessions:
+                logger.info("📭 Активных сессий не найдено")
+                return
+            
+            restored_count = 0
+            for session in active_sessions:
+                session_type = session['session_type']
+                user_id = session['user_id']
+                chat_id = session['chat_id']
+                data = session['data']
+                
+                logger.info(f"🔄 Восстанавливаем сессию: {session_type} для пользователя {user_id}")
+                
+                if session_type == 'expert_session':
+                    # Восстанавливаем сессию эксперта
+                    await self._restore_expert_session(session)
+                    restored_count += 1
+                    
+                elif session_type == 'photo_waiting':
+                    # Восстанавливаем состояние ожидания фото
+                    await self._restore_photo_waiting_session(session)
+                    restored_count += 1
+                    
+                elif session_type == 'digest_edit':
+                    # Восстанавливаем состояние ожидания правок
+                    await self._restore_digest_edit_session(session)
+                    restored_count += 1
+                    
+                elif session_type == 'current_digest':
+                    # Восстанавливаем текущий дайджест
+                    await self._restore_current_digest_session(session)
+                    restored_count += 1
+                    
+                elif session_type == 'moderation_session':
+                    # Восстанавливаем сессию модерации
+                    await self._restore_moderation_session(session)
+                    restored_count += 1
+                    
+                else:
+                    logger.warning(f"⚠️ Неизвестный тип сессии: {session_type}")
+            
+            logger.info(f"✅ Восстановлено {restored_count} активных сессий")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления сессий: {e}")
+    
+    async def _restore_expert_session(self, session: dict):
+        """Восстанавливает сессию эксперта."""
+        try:
+            expert_id = int(session['user_id'])
+            data = session['data']
+            
+            # Уведомляем эксперта о восстановлении сессии
+            await self.application.bot.send_message(
+                chat_id=expert_id,
+                text=f"""
+🔄 **Сессия восстановлена после перезапуска**
+
+👨‍💻 Ваша работа продолжается с того же места.
+📰 Осталось прокомментировать: {len(data['news_ids']) - len(data['commented_news'])} новостей
+
+💬 Продолжайте комментировать новости.
+                """,
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"✅ Сессия эксперта {expert_id} восстановлена")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления сессии эксперта: {e}")
+    
+    async def _restore_photo_waiting_session(self, session: dict):
+        """Восстанавливает состояние ожидания фото."""
+        try:
+            user_id = int(session['user_id'])
+            
+            # Напоминаем куратору о необходимости отправить фото
+            await self.application.bot.send_message(
+                chat_id=user_id,
+                text="""
+📸 **Напоминание: ожидается фото для публикации**
+
+🔄 После перезапуска бота ваш дайджест сохранен.
+📤 Пожалуйста, отправьте фото для публикации в канал.
+                """,
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"✅ Состояние ожидания фото для пользователя {user_id} восстановлено")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления состояния ожидания фото: {e}")
+    
+    async def _restore_digest_edit_session(self, session: dict):
+        """Восстанавливает состояние ожидания правок."""
+        try:
+            user_id = int(session['user_id'])
+            
+            # Напоминаем куратору о необходимости отправить правки
+            await self.application.bot.send_message(
+                chat_id=user_id,
+                text="""
+📝 **Напоминание: ожидаются правки дайджеста**
+
+🔄 После перезапуска бота ваш запрос на редактирование сохранен.
+✏️ Пожалуйста, отправьте исправленный текст дайджеста.
+                """,
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"✅ Состояние ожидания правок для пользователя {user_id} восстановлено")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления состояния ожидания правок: {e}")
+    
+    async def _restore_current_digest_session(self, session: dict):
+        """Восстанавливает текущий дайджест."""
+        try:
+            chat_id = session['chat_id']
+            data = session['data']
+            digest_length = len(data.get('digest_text', ''))
+            
+            logger.info(f"✅ Текущий дайджест для чата {chat_id} восстановлен ({digest_length} символов)")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления текущего дайджеста: {e}")
+    
+    async def _restore_moderation_session(self, session: dict):
+        """Восстанавливает сессию модерации."""
+        try:
+            user_id = int(session['user_id'])
+            data = session['data']
+            
+            # Уведомляем куратора о восстановлении сессии модерации
+            remaining_count = len(data['news_items']) - len(data['removed_news'])
+            
+            await self.application.bot.send_message(
+                chat_id=user_id,
+                text=f"""
+🔄 **Сессия модерации восстановлена**
+
+📝 После перезапуска бота ваша модерация продолжается.
+📰 Осталось новостей для модерации: {remaining_count}
+
+🗑️ Продолжайте удалять ненужные новости кнопками.
+✅ Затем нажмите "Одобрить оставшиеся".
+                """,
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"✅ Сессия модерации для пользователя {user_id} восстановлена")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления сессии модерации: {e}")
 
 
 # ==================== ФУНКЦИЯ ЗАПУСКА ====================
@@ -1367,7 +1641,6 @@ async def main():
     
     # Создаем и запускаем бота
     bot = AINewsBot(token)
-    
     
     try:
         await bot.run()

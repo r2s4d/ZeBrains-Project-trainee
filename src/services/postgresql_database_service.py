@@ -7,8 +7,10 @@ from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
 from datetime import datetime
 import logging
+import hashlib
 
 from src.models.database import Source, News, Expert, Comment, NewsSource
+from src.services.sqlite_cache_service import cache, get_cache_key
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -20,7 +22,6 @@ class PostgreSQLDatabaseService:
         """Инициализация сервиса."""
         self.engine = None
         self.SessionLocal = None
-        # Временное хранение выбранного эксперта недели
         self.selected_expert_id = None
         self._initialize_connection()
     
@@ -94,11 +95,6 @@ class PostgreSQLDatabaseService:
                 logger.error(f"❌ Ошибка при получении всех новостей: {e}")
                 return []
     
-    
-    
-    
-    
-
     async def get_news_since(self, start_time: datetime) -> List[News]:
         """Получить новости, опубликованные после указанного времени."""
         try:
@@ -123,6 +119,15 @@ class PostgreSQLDatabaseService:
             List[News]: Список одобренных новостей
         """
         try:
+            # Создаем ключ кэша
+            cache_key = get_cache_key("db_approved_news", limit)
+            
+            # Проверяем кэш
+            cached_news = cache.get(cache_key)
+            if cached_news:
+                logger.info(f"🎯 Одобренные новости из кэша: {len(cached_news)} новостей")
+                return cached_news
+            
             with self.get_session() as session:
                 # Получаем одобренные новости, отсортированные по дате
                 news_list = session.query(News).filter(
@@ -130,6 +135,24 @@ class PostgreSQLDatabaseService:
                 ).order_by(News.created_at.desc()).limit(limit).all()
                 
                 logger.info(f"📊 Получено {len(news_list)} одобренных новостей для дайджеста")
+                
+                # Конвертируем в словари для кэширования
+                news_dicts = []
+                for news in news_list:
+                    news_dict = {
+                        'id': news.id,
+                        'title': news.title,
+                        'content': news.content,
+                        'status': news.status,
+                        'created_at': news.created_at.isoformat() if news.created_at else None,
+                        'published_at': news.published_at.isoformat() if news.published_at else None
+                    }
+                    news_dicts.append(news_dict)
+                
+                # Сохраняем в кэш на 1 час
+                cache.set(cache_key, news_dicts, expire_seconds=3600)
+                logger.debug(f"💾 Одобренные новости сохранены в кэш: {cache_key}")
+                
                 return news_list
                 
         except Exception as e:
@@ -144,12 +167,38 @@ class PostgreSQLDatabaseService:
             Expert: Эксперт недели или None
         """
         try:
+            # Создаем ключ кэша
+            cache_key = get_cache_key("db_expert_of_week", self.selected_expert_id)
+            
+            # Проверяем кэш
+            cached_expert = cache.get(cache_key)
+            if cached_expert:
+                logger.info(f"🎯 Эксперт недели из кэша: {cached_expert.get('name', 'Unknown')}")
+                # Конвертируем обратно в объект Expert
+                expert = Expert()
+                expert.id = cached_expert['id']
+                expert.name = cached_expert['name']
+                expert.specialization = cached_expert['specialization']
+                expert.is_active = cached_expert['is_active']
+                return expert
+            
             with self.get_session() as session:
                 # Если есть выбранный эксперт в памяти, возвращаем его
                 if self.selected_expert_id:
                     expert = session.query(Expert).filter(Expert.id == self.selected_expert_id).first()
                     if expert:
                         logger.info(f"👤 Возвращаем выбранного эксперта недели: {expert.name}")
+                        
+                        # Сохраняем в кэш на 6 часов
+                        expert_dict = {
+                            'id': expert.id,
+                            'name': expert.name,
+                            'specialization': expert.specialization,
+                            'is_active': expert.is_active
+                        }
+                        cache.set(cache_key, expert_dict, expire_seconds=21600)
+                        logger.debug(f"💾 Эксперт недели сохранен в кэш: {cache_key}")
+                        
                         return expert
                 
                 # Иначе возвращаем первого активного эксперта
@@ -159,6 +208,16 @@ class PostgreSQLDatabaseService:
                 
                 if expert:
                     logger.info(f"👤 Возвращаем первого активного эксперта: {expert.name}")
+                    
+                    # Сохраняем в кэш на 6 часов
+                    expert_dict = {
+                        'id': expert.id,
+                        'name': expert.name,
+                        'specialization': expert.specialization,
+                        'is_active': expert.is_active
+                    }
+                    cache.set(cache_key, expert_dict, expire_seconds=21600)
+                    logger.debug(f"💾 Эксперт недели сохранен в кэш: {cache_key}")
                 else:
                     logger.warning("⚠️ Нет активных экспертов")
                 
@@ -196,9 +255,9 @@ class PostgreSQLDatabaseService:
             logger.error(f"❌ Ошибка установки эксперта недели: {e}")
             return False
     
-    def get_expert_comments_for_news(self, news_ids: List[int]) -> Dict[int, Dict]:
+    async def get_expert_comments_for_news(self, news_ids: List[int]) -> Dict[int, Dict]:
         """
-        Получить комментарии экспертов к новостям.
+        Получить комментарии экспертов к новостям из bot_sessions.
         
         Args:
             news_ids: Список ID новостей
@@ -207,28 +266,39 @@ class PostgreSQLDatabaseService:
             Dict[int, Dict]: Словарь {news_id: comment_data}
         """
         try:
-            with self.get_session() as session:
-                # Получаем комментарии к новостям
-                comments = session.query(Comment).filter(
-                    Comment.news_id.in_(news_ids)
-                ).all()
+            from src.services.bot_session_service import bot_session_service
+            
+            # Получаем все комментарии из bot_sessions
+            all_comments = await bot_session_service.get_active_sessions('expert_comment')
+            
+            # Формируем словарь комментариев для нужных новостей
+            comments_dict = {}
+            logger.info(f"🔍 Найдено комментариев в БД: {len(all_comments)} для новостей: {news_ids}")
+            
+            for comment_session in all_comments:
+                data = comment_session.get('data', {})
+                news_id = data.get('news_id')
                 
-                # Формируем словарь комментариев
-                comments_dict = {}
-                logger.info(f"🔍 Найдено комментариев: {len(comments)} для новостей: {news_ids}")
-                
-                for comment in comments:
-                    comments_dict[comment.news_id] = {
-                        "text": comment.text,
+                if news_id in news_ids:
+                    expert_id = data.get('expert_id')
+                    
+                    # Получаем данные эксперта
+                    with self.get_session() as session:
+                        expert = session.query(Expert).filter(Expert.telegram_id == str(expert_id)).first()
+                        expert_name = expert.name if expert else "Неизвестный эксперт"
+                        expert_specialization = expert.specialization if expert else "AI"
+                    
+                    comments_dict[news_id] = {
+                        "text": data.get('comment', ''),
                         "expert": {
-                            "name": comment.expert.name if comment.expert else "Неизвестный эксперт",
-                            "specialization": comment.expert.specialization if comment.expert else "AI"
+                            "name": expert_name,
+                            "specialization": expert_specialization
                         }
                     }
-                    logger.debug(f"📝 Комментарий для новости {comment.news_id}: {comment.text[:50]}...")
-                
-                logger.info(f"✅ Возвращаем {len(comments_dict)} комментариев")
-                return comments_dict
+                    logger.debug(f"📝 Комментарий для новости {news_id}: {data.get('comment', '')[:50]}...")
+            
+            logger.info(f"✅ Возвращаем {len(comments_dict)} комментариев")
+            return comments_dict
                 
         except Exception as e:
             logger.error(f"❌ Ошибка получения комментариев: {e}")
@@ -245,6 +315,16 @@ class PostgreSQLDatabaseService:
             Dict[int, List[str]]: Словарь {news_id: [source_names]}
         """
         try:
+            # Создаем ключ кэша
+            news_ids_str = "_".join(map(str, sorted(news_ids)))
+            cache_key = get_cache_key("db_news_sources", news_ids_str)
+            
+            # Проверяем кэш
+            cached_sources = cache.get(cache_key)
+            if cached_sources:
+                logger.info(f"🎯 Источники новостей из кэша: {len(cached_sources)} новостей")
+                return cached_sources
+            
             with self.get_session() as session:
                 # Получаем новости с их источниками
                 news_list = session.query(News).filter(
@@ -308,6 +388,11 @@ class PostgreSQLDatabaseService:
                             logger.warning(f"❌ Новость {news.id}: нет источников")
                 
                 logger.info(f"✅ Возвращаем источники для {len(sources_dict)} новостей")
+                
+                # Сохраняем в кэш на 2 часа
+                cache.set(cache_key, sources_dict, expire_seconds=7200)
+                logger.debug(f"💾 Источники новостей сохранены в кэш: {cache_key}")
+                
                 return sources_dict
                 
         except Exception as e:

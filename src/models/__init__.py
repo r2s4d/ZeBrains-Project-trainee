@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Импортируем все модели из файла database.py
-from src.models.database import Base, Source, News, NewsSource, Curator, Expert, Summary, Comment, Post
+from src.models.database import Base, Source, News, NewsSource, Curator, Expert, Summary, Comment, Post, DigestSession, BotSession
 
 # Импортируем централизованную конфигурацию
 from src.config import config

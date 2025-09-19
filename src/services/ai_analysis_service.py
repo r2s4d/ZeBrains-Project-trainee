@@ -7,11 +7,13 @@ AI анализ новостей с использованием OpenAI API.
 
 import logging
 import os
+import hashlib
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass
 from openai import OpenAI
 from src.config import config
+from src.services.sqlite_cache_service import cache, get_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,16 @@ class AIAnalysisService:
             str: Краткое саммари
         """
         try:
+            # Создаем ключ кэша для саммари
+            content_hash = hashlib.md5(f"{title}_{content}".encode()).hexdigest()
+            cache_key = get_cache_key("ai_summary", content_hash)
+            
+            # Проверяем кэш
+            cached_summary = cache.get(cache_key)
+            if cached_summary:
+                logger.info(f"🎯 Саммари из кэша: {len(cached_summary)} символов")
+                return cached_summary
+            
             # Используем ProxyAPI для генерации саммари
             if self.use_proxy and self.client:
                 logger.info("🚀 Используем ProxyAPI для генерации саммари")
@@ -109,6 +121,11 @@ class AIAnalysisService:
                     
                     summary = response.choices[0].message.content.strip()
                     logger.info(f"✅ Саммари сгенерировано: {len(summary)} символов")
+                    
+                    # Сохраняем в кэш на 24 часа
+                    cache.set(cache_key, summary, expire_seconds=86400)
+                    logger.debug(f"💾 Саммари сохранено в кэш: {cache_key}")
+                    
                     return summary
                     
                 except Exception as e:
@@ -136,6 +153,16 @@ class AIAnalysisService:
             Сгенерированный текст
         """
         try:
+            # Создаем ключ кэша для анализа текста
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+            cache_key = get_cache_key("ai_text", prompt_hash)
+            
+            # Проверяем кэш
+            cached_text = cache.get(cache_key)
+            if cached_text:
+                logger.info(f"🎯 AI текст из кэша: {len(cached_text)} символов")
+                return cached_text
+            
             # Используем ProxyAPI для генерации текста
             if hasattr(self, 'use_proxy') and self.use_proxy and self.client:
                 try:
@@ -150,6 +177,11 @@ class AIAnalysisService:
                     
                     result = response.choices[0].message.content.strip()
                     logger.info("✅ AI текст сгенерирован успешно")
+                    
+                    # Сохраняем в кэш на 24 часа
+                    cache.set(cache_key, result, expire_seconds=86400)
+                    logger.debug(f"💾 AI текст сохранен в кэш: {cache_key}")
+                    
                     return result
                     
                 except Exception as e:
@@ -209,6 +241,16 @@ class AIAnalysisService:
         Returns:
             int: Оценка релевантности от 0 до 10, или None при ошибке
         """
+        # Создаем ключ кэша для анализа релевантности
+        content_hash = hashlib.md5(f"{title}_{content}".encode()).hexdigest()
+        cache_key = get_cache_key("ai_relevance", content_hash)
+        
+        # Проверяем кэш
+        cached_relevance = cache.get(cache_key)
+        if cached_relevance is not None:
+            logger.info(f"🎯 Релевантность из кэша: {cached_relevance}/10")
+            return cached_relevance
+        
         if not self.client or not self.use_proxy:
             logger.warning("⚠️ AI анализ недоступен, используем fallback по ключевым словам")
             return self._fallback_relevance_check(title, content)
@@ -269,6 +311,11 @@ class AIAnalysisService:
                     relevance_score = int(ai_response)
                     if 0 <= relevance_score <= 10:
                         logger.info(f"✅ Релевантность новости: {relevance_score}/10")
+                        
+                        # Сохраняем в кэш на 24 часа
+                        cache.set(cache_key, relevance_score, expire_seconds=86400)
+                        logger.debug(f"💾 Релевантность сохранена в кэш: {cache_key}")
+                        
                         return relevance_score
                     else:
                         logger.warning(f"⚠️ Некорректная оценка релевантности: {relevance_score}")

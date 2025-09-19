@@ -14,12 +14,13 @@ CuratorApprovalService - сервис для согласования дайдж
 """
 
 from src.config import config
+from src.services.bot_session_service import bot_session_service
 
 import asyncio
 import logging
 import aiohttp
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
-from datetime import datetime
 
 from src.services.final_digest_formatter_service import FinalDigestFormatterService
 
@@ -53,10 +54,76 @@ class CuratorApprovalService:
         self.max_message_length = config.message.max_digest_length
         self.approval_timeout = config.timeout.approval_timeout
         
-        # Хранение текущего дайджеста для публикации
-        self.current_digest_text = None
+
+        # ✅ Используем BotSessionService для управления состояниями
+        self.session_service = bot_session_service
         
         logger.info(f"CuratorApprovalService инициализирован для чата {curator_chat_id}")
+    
+    async def _save_current_digest(self, digest_text: str, chat_id: str = None) -> bool:
+        """
+        Сохраняет текущий дайджест в БД.
+        
+        Args:
+            digest_text: Текст дайджеста
+            chat_id: ID чата куратора (опционально)
+            
+        Returns:
+            bool: True если успешно сохранено
+        """
+        try:
+            return await self.session_service.save_session(
+                session_type='current_digest',
+                chat_id=chat_id or self.curator_chat_id,
+                data={'digest_text': digest_text, 'chat_id': chat_id},
+                expires_at=datetime.now() + timedelta(hours=2)
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения текущего дайджеста: {e}")
+            return False
+    
+    async def _get_current_digest(self, chat_id: str = None) -> Optional[str]:
+        """
+        Получает текущий дайджест из БД.
+        
+        Args:
+            chat_id: ID чата куратора (опционально)
+            
+        Returns:
+            str или None: Текст дайджеста или None если не найден
+        """
+        try:
+            session_data = await self.session_service.get_session_data(
+                session_type='current_digest',
+                chat_id=chat_id or self.curator_chat_id
+            )
+            
+            if session_data:
+                return session_data.get('digest_text')
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения текущего дайджеста: {e}")
+            return None
+    
+    async def _delete_current_digest(self, chat_id: str = None) -> bool:
+        """
+        Удаляет текущий дайджест из БД.
+        
+        Args:
+            chat_id: ID чата куратора (опционально)
+            
+        Returns:
+            bool: True если успешно удалено
+        """
+        try:
+            return await self.session_service.delete_session(
+                session_type='current_digest',
+                chat_id=chat_id or self.curator_chat_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления текущего дайджеста: {e}")
+            return False
     
     async def send_digest_for_approval(
         self, 
@@ -76,9 +143,9 @@ class CuratorApprovalService:
         try:
             logger.info("📤 Отправка дайджеста на согласование куратору")
             
-            # Сохраняем текст дайджеста для возможной публикации
-            self.current_digest_text = formatted_digest
-            logger.info(f"💾 Сохранен текст дайджеста: {len(formatted_digest)} символов")
+            # ✅ Сохраняем текст дайджеста в БД вместо памяти
+            await self._save_current_digest(formatted_digest, chat_id)
+            logger.info(f"💾 Сохранен текст дайджеста в БД: {len(formatted_digest)} символов")
             
             # 1. Разделяем на части если нужно
             digest_parts = self.formatter_service.split_digest_message(formatted_digest)
@@ -260,7 +327,9 @@ class CuratorApprovalService:
             Результат обработки
         """
         try:
-            logger.info(f"🔍 handle_approval: callback_data={callback_data}, current_digest_text={self.current_digest_text is not None}")
+            # Получаем текущий дайджест из БД
+            current_digest = await self._get_current_digest()
+            logger.info(f"🔍 handle_approval: callback_data={callback_data}, current_digest_text={current_digest is not None}")
             if callback_data == "approve_digest":
                 return await self._handle_digest_approval(user_id)
             elif callback_data == "edit_digest":
@@ -293,15 +362,22 @@ class CuratorApprovalService:
         try:
             logger.info(f"✅ Куратор {user_id} одобрил дайджест")
             
-            # Устанавливаем состояние ожидания фото в боте
-            logger.info(f"🔍 Диагностика: bot_instance={self.bot_instance is not None}, current_digest_text={self.current_digest_text is not None}")
-            if self.current_digest_text:
-                logger.info(f"📝 Текст дайджеста: {self.current_digest_text[:100]}...")
-            if self.bot_instance and self.current_digest_text:
-                self.bot_instance.waiting_for_photo[int(user_id)] = self.current_digest_text
-                logger.info(f"🔄 Установлено состояние ожидания фото для пользователя {user_id}")
+            # ✅ Получаем дайджест из БД и устанавливаем состояние ожидания фото
+            current_digest = await self._get_current_digest()
+            logger.info(f"🔍 Диагностика: bot_instance={self.bot_instance is not None}, current_digest_text={current_digest is not None}")
+            if current_digest:
+                logger.info(f"📝 Текст дайджеста: {current_digest[:100]}...")
+                
+                # Сохраняем состояние ожидания фото в БД
+                await self.session_service.save_session(
+                    session_type='photo_waiting',
+                    user_id=str(user_id),
+                    data={'digest_text': current_digest, 'user_id': user_id},
+                    expires_at=datetime.now() + timedelta(hours=1)
+                )
+                logger.info(f"🔄 Установлено состояние ожидания фото в БД для пользователя {user_id}")
             else:
-                logger.error(f"❌ Не удалось установить состояние ожидания фото: bot_instance={self.bot_instance is not None}, current_digest_text={self.current_digest_text is not None}")
+                logger.error(f"❌ Не удалось получить текущий дайджест из БД")
             
             # Отправляем подтверждение
             confirmation_message = """
@@ -390,10 +466,17 @@ class CuratorApprovalService:
         try:
             logger.info(f"✅ Куратор {user_id} одобрил исправленный дайджест")
             
-            # Устанавливаем состояние ожидания фото в боте
-            if self.bot_instance and self.current_digest_text:
-                self.bot_instance.waiting_for_photo[int(user_id)] = self.current_digest_text
-                logger.info(f"🔄 Установлено состояние ожидания фото для пользователя {user_id}")
+            # ✅ Получаем дайджест из БД и устанавливаем состояние ожидания фото
+            current_digest = await self._get_current_digest()
+            if current_digest:
+                # Сохраняем состояние ожидания фото в БД
+                await self.session_service.save_session(
+                    session_type='photo_waiting',
+                    user_id=str(user_id),
+                    data={'digest_text': current_digest, 'user_id': user_id},
+                    expires_at=datetime.now() + timedelta(hours=1)
+                )
+                logger.info(f"🔄 Установлено состояние ожидания фото в БД для пользователя {user_id}")
             
             # Отправляем запрос на фото для публикации
             result = await self._send_message_to_curator(
@@ -437,8 +520,8 @@ class CuratorApprovalService:
             # Проверяем грамматику исправленного текста
             corrected_text = self.formatter_service.check_grammar_and_punctuation(edited_text)
             
-            # Сохраняем исправленный текст дайджеста для возможной публикации
-            self.current_digest_text = corrected_text
+            # ✅ Сохраняем исправленный текст дайджеста в БД
+            await self._save_current_digest(corrected_text)
             
             # Отправляем исправленный дайджест обратно для финального одобрения
             logger.info("📤 Вызываем _send_edited_digest_for_final_approval")

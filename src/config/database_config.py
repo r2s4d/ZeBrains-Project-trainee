@@ -12,7 +12,7 @@ class DatabaseConfig:
     HOST = os.getenv('DB_HOST', 'localhost')
     PORT = os.getenv('DB_PORT', '5432')
     DATABASE = os.getenv('DB_NAME', 'ai_news_assistant')
-    USERNAME = os.getenv('DB_USER', 'postgres')
+    USERNAME = os.getenv('DB_USER', 'bot_user')
     PASSWORD = os.getenv('DB_PASSWORD', '')  # Будет запрашиваться при подключении
     
     @classmethod

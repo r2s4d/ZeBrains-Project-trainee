@@ -12,6 +12,8 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import config
+from src.services.bot_session_service import bot_session_service
+from src.services.sqlite_cache_service import cache
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,24 @@ class SchedulerService:
                     logger.info("📱 Автоматический парсинг новостей настроен:")
                     logger.info("   - Активные часы (9:00-21:00): каждый час")
                     logger.info("   - Ночные часы (21:00-9:00): каждые 4 часа")
+                
+                # Добавляем задачу очистки кэша каждый час
+                self.scheduler.add_job(
+                    func=self._cleanup_cache,
+                    trigger=CronTrigger(minute=0),  # Каждый час в 0 минут
+                    id="cache_cleanup",
+                    name="Очистка кэша",
+                    replace_existing=True
+                )
+                
+                # Добавляем задачу очистки сессий каждые 30 минут
+                self.scheduler.add_job(
+                    func=self._cleanup_sessions,
+                    trigger=CronTrigger(minute="0,30"),  # Каждые 30 минут
+                    id="sessions_cleanup",
+                    name="Очистка сессий",
+                    replace_existing=True
+                )
                 
                 # Запускаем планировщик
                 self.scheduler.start()
@@ -142,6 +162,50 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"❌ Ошибка автоматического парсинга новостей: {e}")
     
+    async def _cleanup_cache(self):
+        """
+        Автоматически очищает истекший кэш каждый час.
+        """
+        try:
+            logger.info("🧹 Запуск автоматической очистки кэша...")
+            
+            # Очищаем истекшие записи
+            deleted_count = cache.cleanup_expired()
+            
+            if deleted_count > 0:
+                logger.info(f"✅ Очистка кэша завершена: удалено {deleted_count} истекших записей")
+            else:
+                logger.info("ℹ️ Очистка кэша: нет истекших записей")
+            
+            # Получаем статистику кэша
+            stats = cache.get_stats()
+            logger.info(f"📊 Статистика кэша: {stats['active_entries']} активных записей, {stats['db_size_mb']}MB")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка автоматической очистки кэша: {e}")
+    
+    async def _cleanup_sessions(self):
+        """
+        Автоматически очищает истекшие сессии каждые 30 минут.
+        """
+        try:
+            logger.info("🧹 Запуск автоматической очистки сессий...")
+            
+            # Очищаем истекшие сессии
+            deleted_count = await bot_session_service.cleanup_expired_sessions()
+            
+            if deleted_count > 0:
+                logger.info(f"✅ Очистка сессий завершена: удалено {deleted_count} истекших сессий")
+            else:
+                logger.info("ℹ️ Очистка сессий: нет истекших сессий")
+            
+            # Получаем статистику сессий
+            stats = await bot_session_service.get_session_stats()
+            logger.info(f"📊 Статистика сессий: {stats.get('active_sessions', 0)} активных, {stats.get('total_sessions', 0)} всего")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка автоматической очистки сессий: {e}")
+    
     def get_next_run_time(self) -> Optional[datetime]:
         """
         Получает время следующего запуска утреннего дайджеста.
@@ -171,7 +235,8 @@ class SchedulerService:
                 "is_running": self.is_running,
                 "next_morning_digest": self.get_next_run_time(),
                 "jobs_count": len(self.scheduler.get_jobs()),
-                "auto_parsing_enabled": self.news_parser_service is not None
+                "auto_parsing_enabled": self.news_parser_service is not None,
+                "cache_stats": cache.get_stats()
             }
             
             # Добавляем информацию о задачах парсинга

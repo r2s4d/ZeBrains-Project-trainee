@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from src.config import config
+from src.services.bot_session_service import bot_session_service
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,9 @@ class ExpertInteractionService:
         """
         self.bot = bot
         self.curator_approval_service = curator_approval_service
-        self.active_sessions: Dict[int, ExpertSession] = {}  # expert_id -> session
-        self.comments: List[ExpertComment] = []  # Хранение в памяти
+    
+        # ✅ Используем BotSessionService для управления состояниями
+        self.session_service = bot_session_service
         
         # Настройки напоминаний
         self.REMINDER_INTERVAL = config.timeout.reminder_interval
@@ -62,6 +64,130 @@ class ExpertInteractionService:
         logger.info("✅ ExpertInteractionService инициализирован")
         if curator_approval_service:
             logger.info("✅ CuratorApprovalService передан в ExpertInteractionService")
+    
+    async def _save_expert_session(self, expert_id: int, session: ExpertSession) -> bool:
+        """
+        Сохраняет сессию эксперта в БД.
+        
+        Args:
+            expert_id: ID эксперта
+            session: Объект сессии эксперта
+            
+        Returns:
+            bool: True если успешно сохранено
+        """
+        try:
+            session_data = {
+                'expert_id': session.expert_id,
+                'news_ids': list(session.news_ids),
+                'commented_news': list(session.commented_news),
+                'start_time': session.start_time.isoformat(),
+                'last_reminder': session.last_reminder.isoformat(),
+                'reminder_count': session.reminder_count,
+                'news_items': session.news_items or [],
+                'selected_news_id': session.selected_news_id,
+                'message_ids': session.message_ids or []
+            }
+            
+            return await self.session_service.save_session(
+                session_type='expert_session',
+                user_id=str(expert_id),
+                data=session_data,
+                expires_at=datetime.now() + timedelta(hours=24)
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения сессии эксперта {expert_id}: {e}")
+            return False
+    
+    async def _get_expert_session(self, expert_id: int) -> Optional[ExpertSession]:
+        """
+        Получает сессию эксперта из БД.
+        
+        Args:
+            expert_id: ID эксперта
+            
+        Returns:
+            ExpertSession или None если не найдено
+        """
+        try:
+            session_data = await self.session_service.get_session_data(
+                session_type='expert_session',
+                user_id=str(expert_id)
+            )
+            
+            if not session_data:
+                return None
+            
+            # Восстанавливаем объект ExpertSession из данных БД
+            session = ExpertSession(
+                expert_id=session_data['expert_id'],
+                news_ids=set(session_data['news_ids']),
+                commented_news=set(session_data['commented_news']),
+                start_time=datetime.fromisoformat(session_data['start_time']),
+                last_reminder=datetime.fromisoformat(session_data['last_reminder']),
+                reminder_count=session_data['reminder_count'],
+                news_items=session_data.get('news_items', []),
+                selected_news_id=session_data.get('selected_news_id'),
+                message_ids=session_data.get('message_ids', [])
+            )
+            
+            return session
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сессии эксперта {expert_id}: {e}")
+            return None
+    
+    async def _delete_expert_session(self, expert_id: int) -> bool:
+        """
+        Удаляет сессию эксперта из БД.
+        
+        Args:
+            expert_id: ID эксперта
+            
+        Returns:
+            bool: True если успешно удалено
+        """
+        try:
+            return await self.session_service.delete_session(
+                session_type='expert_session',
+                user_id=str(expert_id)
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления сессии эксперта {expert_id}: {e}")
+            return False
+    
+    async def _save_expert_comment(self, comment: ExpertComment) -> bool:
+        """
+        Сохраняет комментарий эксперта в БД.
+        
+        Args:
+            comment: Объект комментария эксперта
+            
+        Returns:
+            bool: True если успешно сохранено
+        """
+        try:
+            comment_data = {
+                'news_id': comment.news_id,
+                'comment': comment.comment,
+                'timestamp': comment.timestamp.isoformat(),
+                'expert_id': comment.expert_id
+            }
+            
+            # Сохраняем как отдельную сессию с уникальным ID
+            comment_id = f"{comment.expert_id}_{comment.news_id}_{int(comment.timestamp.timestamp())}"
+            
+            return await self.session_service.save_session(
+                session_type='expert_comment',
+                user_id=comment_id,
+                data=comment_data,
+                expires_at=datetime.now() + timedelta(days=7)  # Комментарии храним дольше
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения комментария эксперта: {e}")
+            return False
     
     def _clean_html_text(self, text: str) -> str:
         """
@@ -135,7 +261,8 @@ class ExpertInteractionService:
             # Сохраняем полные данные новостей для отображения
             session.news_items = news_items
             
-            self.active_sessions[expert_id] = session
+            # ✅ Сохраняем сессию в БД вместо памяти
+            await self._save_expert_session(expert_id, session)
             
             # Отправляем приветственное сообщение
             welcome_text = self._create_welcome_message(expert_name)
@@ -339,7 +466,7 @@ class ExpertInteractionService:
         Returns:
             str: Сообщение для эксперта
         """
-        session = self.active_sessions.get(expert_id)
+        session = await self._get_expert_session(expert_id)
         if not session:
             return "❌ Сессия не найдена. Обратитесь к кураторам."
         
@@ -351,6 +478,9 @@ class ExpertInteractionService:
         
         # Сохраняем выбранную новость в сессии
         session.selected_news_id = news_id
+        
+        # Сохраняем обновленную сессию в БД
+        await self._save_expert_session(expert_id, session)
         
         # Находим выбранную новость
         selected_news = None
@@ -387,7 +517,7 @@ class ExpertInteractionService:
     async def _delete_news_messages(self, expert_id: int):
         """Удаляет все сообщения с новостями для эксперта."""
         try:
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session or not hasattr(session, 'message_ids'):
                 return
             
@@ -421,7 +551,7 @@ class ExpertInteractionService:
             bool: True если комментарий сохранен
         """
         try:
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session:
                 logger.error(f"❌ Сессия не найдена для эксперта {expert_id}")
                 return False
@@ -433,46 +563,19 @@ class ExpertInteractionService:
                 timestamp=datetime.now(),
                 expert_id=expert_id
             )
-            self.comments.append(comment)
-            
-            # Сохраняем комментарий в базу данных
-            try:
-                from models.database import Comment, Expert
-                from services.postgresql_database_service import PostgreSQLDatabaseService
-                
-                db_service = PostgreSQLDatabaseService()
-                with db_service.get_session() as db_session:
-                    # Находим эксперта по Telegram ID (expert_id это telegram_id в данном контексте)
-                    expert = db_session.query(Expert).filter(Expert.telegram_id == str(expert_id)).first()
-                    if not expert:
-                        logger.error(f"❌ Эксперт с Telegram ID {expert_id} не найден в БД")
-                        return False
-                    
-                    logger.info(f"✅ Найден эксперт в БД: {expert.name} (ID: {expert.id}, Telegram ID: {expert.telegram_id})")
-                    
-                    # Создаем комментарий в БД
-                    db_comment = Comment(
-                        text=comment_text,
-                        news_id=news_id,
-                        expert_id=expert.id,  # Используем expert.id из БД, а не telegram_id
-                        created_at=datetime.now()
-                    )
-                    
-                    db_session.add(db_comment)
-                    db_session.commit()
-                    logger.info(f"✅ Комментарий сохранен в БД: эксперт {expert_id}, новость {news_id}")
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка сохранения комментария в БД: {e}")
-                # Продолжаем работу даже если БД недоступна
+            # Сохраняем комментарий через session_service
+            await self._save_expert_comment(comment)
             
             # Отмечаем новость как прокомментированную
             session.commented_news.add(news_id)
             
+            # Сохраняем обновленную сессию в БД
+            await self._save_expert_session(expert_id, session)
+            
             logger.info(f"✅ Комментарий сохранен: эксперт {expert_id}, новость {news_id}")
             
             # Проверяем, завершена ли работа эксперта
-            if self._is_expert_work_completed(expert_id):
+            if await self._is_expert_work_completed(expert_id):
                 await self._notify_expert_completion(expert_id)
                 # Уведомляем кураторов и создаем финальный дайджест
                 await self._notify_curators_completion(expert_id)
@@ -483,9 +586,9 @@ class ExpertInteractionService:
             logger.error(f"❌ Ошибка сохранения комментария: {e}")
             return False
     
-    def _is_expert_work_completed(self, expert_id: int) -> bool:
+    async def _is_expert_work_completed(self, expert_id: int) -> bool:
         """Проверяет, завершил ли эксперт работу."""
-        session = self.active_sessions.get(expert_id)
+        session = await self._get_expert_session(expert_id)
         if not session:
             return False
         
@@ -514,8 +617,9 @@ class ExpertInteractionService:
             await self._notify_curators_completion(expert_id)
             
             # Очищаем сессию
-            if expert_id in self.active_sessions:
-                del self.active_sessions[expert_id]
+            session = await self._get_expert_session(expert_id)
+            if session:
+                await self._delete_expert_session(expert_id)
             
             logger.info(f"✅ Эксперт {expert_id} уведомлен о завершении работы")
             
@@ -528,7 +632,7 @@ class ExpertInteractionService:
             # ID чата кураторов
             curators_chat_id = config.telegram.curator_chat_id
             
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session:
                 return
             
@@ -576,7 +680,7 @@ class ExpertInteractionService:
             database_service = PostgreSQLDatabaseService()
             
             # Получаем данные из текущей сессии эксперта
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session:
                 logger.error(f"❌ Сессия эксперта {expert_id} не найдена")
                 return
@@ -595,7 +699,7 @@ class ExpertInteractionService:
             
             # Получаем комментарии эксперта для этих новостей
             news_ids = [news.id for news in approved_news]
-            expert_comments = database_service.get_expert_comments_for_news(news_ids)
+            expert_comments = await database_service.get_expert_comments_for_news(news_ids)
             news_sources = database_service.get_news_sources(news_ids)
             
             logger.info(f"📊 Получено данных: {len(approved_news)} новостей, эксперт: {expert_of_week.name if expert_of_week else 'None'}")
@@ -647,11 +751,15 @@ class ExpertInteractionService:
     
     async def _start_reminder_system(self, expert_id: int):
         """Запускает систему напоминаний для эксперта."""
-        while expert_id in self.active_sessions:
+        while True:
+            # Проверяем, есть ли активная сессия в БД
+            session_check = await self._get_expert_session(expert_id)
+            if not session_check:
+                break
             try:
                 await asyncio.sleep(self.REMINDER_INTERVAL)
                 
-                session = self.active_sessions.get(expert_id)
+                session = await self._get_expert_session(expert_id)
                 if not session:
                     break
                 
@@ -675,7 +783,7 @@ class ExpertInteractionService:
     async def _send_reminder_to_expert(self, expert_id: int):
         """Отправляет напоминание эксперту."""
         try:
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session:
                 return
             
@@ -710,7 +818,7 @@ class ExpertInteractionService:
         try:
             curators_chat_id = config.telegram.curator_chat_id
             
-            session = self.active_sessions.get(expert_id)
+            session = await self._get_expert_session(expert_id)
             if not session:
                 return
             
@@ -723,7 +831,7 @@ class ExpertInteractionService:
 👨‍💻 <b>{expert_name}</b> не отвечает уже <b>4+ часа</b>
 
 📰 Новости ожидают комментариев:
-{self._format_remaining_news_list(expert_id)}
+{await self._format_remaining_news_list(expert_id)}
 
 🔔 <b>Пожалуйста, свяжитесь с экспертом лично:</b>
 • Напишите в личку
@@ -746,9 +854,9 @@ class ExpertInteractionService:
         except Exception as e:
             logger.error(f"❌ Ошибка уведомления кураторов о неотзывчивом эксперте: {e}")
     
-    def _format_remaining_news_list(self, expert_id: int) -> str:
+    async def _format_remaining_news_list(self, expert_id: int) -> str:
         """Форматирует список оставшихся новостей."""
-        session = self.active_sessions.get(expert_id)
+        session = await self._get_expert_session(expert_id)
         if not session:
             return "Список недоступен"
         
@@ -769,17 +877,57 @@ class ExpertInteractionService:
         else:
             return f"{minutes}м"
     
-    def get_expert_comments(self, expert_id: int) -> List[ExpertComment]:
-        """Получает все комментарии эксперта."""
-        return [comment for comment in self.comments if comment.expert_id == expert_id]
+    async def get_expert_comments(self, expert_id: int) -> List[ExpertComment]:
+        """Получает все комментарии эксперта из БД."""
+        try:
+            # Получаем комментарии эксперта через session_service
+            # Комментарии сохраняются как отдельные записи в bot_sessions
+            expert_comments = await self.session_service.get_active_sessions('expert_comment')
+            
+            comments = []
+            for comment_session in expert_comments:
+                if comment_session.get('user_id') == str(expert_id):
+                    data = comment_session.get('data', {})
+                    comment = ExpertComment(
+                        news_id=data.get('news_id'),
+                        comment=data.get('comment'),
+                        timestamp=datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat())),
+                        expert_id=expert_id
+                    )
+                    comments.append(comment)
+            
+            return comments
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения комментариев эксперта {expert_id}: {e}")
+            return []
     
-    def get_news_comments(self, news_id: int) -> List[ExpertComment]:
-        """Получает все комментарии к новости."""
-        return [comment for comment in self.comments if comment.news_id == news_id]
+    async def get_news_comments(self, news_id: int) -> List[ExpertComment]:
+        """Получает все комментарии к новости из БД."""
+        try:
+            # Получаем все комментарии и фильтруем по news_id
+            all_comments = await self.session_service.get_active_sessions('expert_comment')
+            
+            comments = []
+            for comment_session in all_comments:
+                data = comment_session.get('data', {})
+                if data.get('news_id') == news_id:
+                    comment = ExpertComment(
+                        news_id=news_id,
+                        comment=data.get('comment'),
+                        timestamp=datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat())),
+                        expert_id=int(comment_session.get('user_id', 0))
+                    )
+                    comments.append(comment)
+            
+            return comments
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения комментариев к новости {news_id}: {e}")
+            return []
     
-    def cleanup_session(self, expert_id: int):
+    async def cleanup_session(self, expert_id: int):
         """Очищает сессию эксперта."""
-        if expert_id in self.active_sessions:
-            del self.active_sessions[expert_id]
+        session = await self._get_expert_session(expert_id)
+        if session:
+            await self._delete_expert_session(expert_id)
             logger.info(f"🧹 Сессия эксперта {expert_id} очищена")
 

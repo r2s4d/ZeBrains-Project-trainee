@@ -249,3 +249,43 @@ class DigestSession(Base):
 # 2. При удалении новости сессия обновляется → updated_at обновляется
 # 3. После завершения модерации сессия деактивируется → is_active = False
 
+# Модель BotSession — состояния бота для устойчивости к перезапускам
+class BotSession(Base):
+    __tablename__ = 'bot_sessions'  # Имя таблицы в базе данных
+
+    id = Column(Integer, primary_key=True)  # Уникальный идентификатор сессии
+    session_type = Column(String(50), nullable=False)  # Тип сессии: 'digest_edit', 'photo_wait', 'expert_session', 'curator_moderation', 'current_digest'
+    user_id = Column(String(50), nullable=True)  # ID пользователя/эксперта (может быть пустым для системных сессий)
+    chat_id = Column(String(50), nullable=True)  # ID чата (может быть пустым для пользовательских сессий)
+    data = Column(Text, nullable=False)  # JSON строка с данными сессии
+    status = Column(String(50), default='active')  # Статус сессии: 'active', 'completed', 'expired', 'cancelled'
+    expires_at = Column(DateTime, nullable=True)  # Время истечения сессии (для автоочистки)
+    created_at = Column(DateTime, default=datetime.utcnow)  # Когда сессия была создана
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)  # Когда сессия была обновлена
+
+    def __repr__(self):
+        # Метод для красивого отображения объекта BotSession при печати
+        return f"<BotSession(id={self.id}, type='{self.session_type}', user_id='{self.user_id}', status='{self.status}')>"
+
+# Пояснения к модели BotSession:
+# - session_type — тип сессии, определяет что именно хранится в data
+#   * 'digest_edit' — ожидание правок дайджеста от куратора
+#   * 'photo_wait' — ожидание фото для публикации от куратора
+#   * 'expert_session' — активная сессия работы эксперта
+#   * 'curator_moderation' — процесс модерации куратором
+#   * 'current_digest' — текущий дайджест для публикации
+#   * 'interactive_moderation' — интерактивная модерация
+# - user_id — ID пользователя (куратора, эксперта) для которого создана сессия
+# - chat_id — ID чата для системных сессий (например, дайджест для конкретного чата)
+# - data — JSON строка с данными сессии (структура зависит от session_type)
+# - status — статус сессии для отслеживания состояния
+# - expires_at — время истечения для автоматической очистки старых сессий
+# - created_at — когда сессия была создана
+# - updated_at — когда сессия была обновлена (автоматически обновляется)
+# 
+# Примеры использования:
+# 1. Куратор получает дайджест → session_type='curator_moderation', data={'approved_news': [], 'rejected_news': []}
+# 2. Эксперт начинает работу → session_type='expert_session', data={'news_items': [...], 'current_index': 0}
+# 3. Ожидание фото → session_type='photo_wait', data={'digest_text': '...', 'channel_id': '...'}
+# 4. Текущий дайджест → session_type='current_digest', data={'digest_text': '...', 'formatted': True}
+

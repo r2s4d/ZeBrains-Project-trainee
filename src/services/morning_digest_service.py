@@ -1169,6 +1169,49 @@ on💡 ИНСТРУКЦИИ:
             logger.error(f"❌ Ошибка простой очистки: {e}")
             return False
     
+    async def _delete_digest_messages_by_content(self, chat_id: str) -> int:
+        """
+        Удаляет сообщения дайджеста по содержимому.
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            int: Количество удаленных сообщений
+        """
+        try:
+            if not self.bot:
+                return 0
+            
+            logger.info(f"🔍 Ищем сообщения дайджеста по содержимому в чате {chat_id}")
+            
+            # Получаем последние сообщения
+            messages = await self.bot.get_chat_history(chat_id, limit=20)
+            
+            deleted_count = 0
+            for msg in messages:
+                if msg.text and any(keyword in msg.text for keyword in [
+                    "УТРЕННИЙ ДАЙДЖЕСТ", 
+                    "НОВОСТИ ДЛЯ МОДЕРАЦИИ", 
+                    "🗑️ Удалить",
+                    "✅ Одобрить оставшиеся"
+                ]):
+                    try:
+                        await self.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                        deleted_count += 1
+                        logger.info(f"🗑️ Удалено сообщение дайджеста по содержимому: {msg.message_id}")
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось удалить сообщение {msg.message_id}: {e}")
+                        continue
+            
+            logger.info(f"✅ Удалено {deleted_count} сообщений дайджеста по содержимому")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления по содержимому: {e}")
+            return 0
+
     async def _delete_message_by_content(self, chat_id: str, message_id: int) -> bool:
         """
         Удаляет сообщение по содержимому, если не удалось по ID.
@@ -1226,6 +1269,8 @@ on💡 ИНСТРУКЦИИ:
                 logger.warning(f"⚠️ Не удалось получить информацию о чате: {e}")
             
             deleted_count = 0
+            
+            # Сначала пытаемся удалить по ID из сессии
             session = self.get_digest_session(chat_id)
             if session and session.get('message_ids'):
                 logger.info(f"🔍 Удаляем сообщения из текущей сессии: {session['message_ids']}")
@@ -1241,8 +1286,14 @@ on💡 ИНСТРУКЦИИ:
                     except Exception as e:
                         logger.warning(f"⚠️ Не удалось удалить сообщение сессии {msg_id}: {e}")
                         continue
-            else:
-                logger.warning(f"⚠️ Сообщения сессии для удаления не найдены (session missing or inactive)")
+            
+            # Если не удалось удалить по ID, удаляем по содержимому
+            if deleted_count == 0:
+                logger.info(f"🔍 Удаление по ID не удалось, удаляем по содержимому...")
+                deleted_count = await self._delete_digest_messages_by_content(chat_id)
+            
+            if deleted_count == 0:
+                logger.warning(f"⚠️ Не удалось удалить ни одного сообщения дайджеста")
             
             logger.info(f"✅ ПРОСТАЯ очистка завершена, удалено {deleted_count} сообщений")
             return deleted_count

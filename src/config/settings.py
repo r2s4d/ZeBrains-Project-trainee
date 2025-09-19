@@ -159,8 +159,8 @@ class AppConfig:
                 database=DatabaseConfig(
                     host=os.getenv('DB_HOST', 'localhost'),
                     port=int(os.getenv('DB_PORT', '5432')),
-                    name=os.getenv('DB_NAME', 'ai_news'),
-                    user=os.getenv('DB_USER', 'postgres'),
+                    name=os.getenv('DB_NAME', 'ai_news_assistant'),
+                    user=os.getenv('DB_USER', 'bot_user'),
                     password=os.getenv('DB_PASSWORD', '')
                 ),
                 telegram=TelegramConfig(
