@@ -60,6 +60,7 @@ class CuratorApprovalService:
         
         logger.info(f"CuratorApprovalService инициализирован для чата {curator_chat_id}")
     
+    
     async def _save_current_digest(self, digest_text: str, chat_id: str = None) -> bool:
         """
         Сохраняет текущий дайджест в БД.
@@ -368,23 +369,23 @@ class CuratorApprovalService:
             if current_digest:
                 logger.info(f"📝 Текст дайджеста: {current_digest[:100]}...")
                 
-                # Сохраняем состояние ожидания фото в БД
+                # Сохраняем простое состояние ожидания фото в БД
                 await self.session_service.save_session(
-                    session_type='photo_waiting',
+                    session_type='photo_waiting',  # Простое состояние ожидания фото
                     user_id=str(user_id),
-                    data={'digest_text': current_digest, 'user_id': user_id},
-                    expires_at=datetime.now() + timedelta(hours=1)
+                    data={
+                        'digest_text': current_digest, 
+                        'user_id': user_id
+                    }
                 )
-                logger.info(f"🔄 Установлено состояние ожидания фото в БД для пользователя {user_id}")
+                logger.info(f"🔄 Установлено состояние ожидания фото для пользователя {user_id}")
             else:
                 logger.error(f"❌ Не удалось получить текущий дайджест из БД")
             
-            # Отправляем подтверждение
-            confirmation_message = """
-✅ **Дайджест одобрен!**
+            # Отправляем простое подтверждение
+            confirmation_message = """✅ <b>Дайджест одобрен!</b>
 
-Теперь нужно добавить фото для поста. Пожалуйста, отправьте изображение.
-            """
+📸 Отправьте фото для публикации дайджеста."""
             
             result = await self._send_message_to_curator(confirmation_message, self.curator_chat_id)
             
@@ -469,18 +470,24 @@ class CuratorApprovalService:
             # ✅ Получаем дайджест из БД и устанавливаем состояние ожидания фото
             current_digest = await self._get_current_digest()
             if current_digest:
-                # Сохраняем состояние ожидания фото в БД
+                # Сохраняем простое состояние ожидания фото в БД
                 await self.session_service.save_session(
-                    session_type='photo_waiting',
+                    session_type='photo_waiting',  # Простое состояние ожидания фото
                     user_id=str(user_id),
-                    data={'digest_text': current_digest, 'user_id': user_id},
-                    expires_at=datetime.now() + timedelta(hours=1)
+                    data={
+                        'digest_text': current_digest, 
+                        'user_id': user_id
+                    }
                 )
-                logger.info(f"🔄 Установлено состояние ожидания фото в БД для пользователя {user_id}")
+                logger.info(f"🔄 Установлено состояние ожидания фото для пользователя {user_id}")
+                
+                photo_request_message = "📸 Отправьте фото для публикации дайджеста."
+            else:
+                photo_request_message = "📸 Отправьте фото для публикации."
             
             # Отправляем запрос на фото для публикации
             result = await self._send_message_to_curator(
-                "📸 Отлично! Дайджест одобрен. Пожалуйста, отправьте фото для публикации в канал.",
+                photo_request_message,
                 self.curator_chat_id
             )
             

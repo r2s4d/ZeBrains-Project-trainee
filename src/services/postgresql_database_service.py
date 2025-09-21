@@ -335,7 +335,16 @@ class PostgreSQLDatabaseService:
                 sources_dict = {}
                 
                 for news in news_list:
-                    # Получаем источники через связь NewsSource
+                    # Проверяем, есть ли прямая ссылка на пост
+                    if news.source_url and news.source_channel_username:
+                        # Используем HTML-ссылку для красивого отображения @channel
+                        channel_name = news.source_channel_username.lstrip('@')
+                        source_link = f'<a href="{news.source_url}">@{channel_name}</a>'
+                        sources_dict[news.id] = [source_link]
+                        logger.debug(f"✅ Новость {news.id}: HTML-ссылка @{channel_name}")
+                        continue
+                    
+                    # Fallback: получаем источники через связь NewsSource
                     news_sources = session.query(NewsSource).filter(
                         NewsSource.news_id == news.id
                     ).all()
@@ -354,11 +363,9 @@ class PostgreSQLDatabaseService:
                         if unique_sources:
                             source = list(unique_sources)[0]  # Берем первый уникальный источник
                             if source.telegram_id:
-                                # Создаем ссылку на Telegram канал
-                                if source.telegram_id.startswith('@'):
-                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id[1:]})"
-                                else:
-                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id})"
+                                # Форматируем как @channel_name с HTML-ссылкой на канал
+                                clean_telegram_id = source.telegram_id.lstrip('@')
+                                source_link = f'<a href="https://t.me/{clean_telegram_id}">@{clean_telegram_id}</a>'
                             else:
                                 source_link = source.name
                             sources_dict[news.id] = [source_link]  # Одна ссылка на источник

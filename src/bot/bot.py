@@ -8,6 +8,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime, timedelta
+from typing import List
 
 # Добавляем путь к модулям
 import sys
@@ -558,18 +559,24 @@ class AINewsBot:
                         )
                         part_buttons.append([approve_button])
                     
+                    # Проверяем длину части перед отправкой
+                    part_text = part['text']
+                    if len(part_text) > 4096:
+                        logger.warning(f"⚠️ Часть всё ещё слишком длинная: {len(part_text)} символов, обрезаем")
+                        part_text = part_text[:4090] + "\n..."
+                    
                     # Отправляем часть с кнопками
                     if part_buttons:
                         from telegram import InlineKeyboardMarkup
                         reply_markup = InlineKeyboardMarkup(part_buttons)
                         message = await query.message.chat.send_message(
-                            text=part['text'],
+                            text=part_text,
                             reply_markup=reply_markup
                         )
                         new_message_ids.append(message.message_id)
                     else:
                         # Отправляем без кнопок
-                        message = await query.message.chat.send_message(text=part['text'])
+                        message = await query.message.chat.send_message(text=part_text)
                         new_message_ids.append(message.message_id)
                 
                 # ВАЖНО: Сохраняем новые ID сообщений в сессию
@@ -738,12 +745,15 @@ class AINewsBot:
             await self._handle_digest_edit_message(update, user.id, text)
             return
         
-        # ✅ Проверяем состояние ожидания фото в БД
+        # ✅ Проверяем состояние ожидания фото в БД (старый формат)
         photo_waiting_session = await self.session_service.get_session_data(
             session_type='photo_waiting',
             user_id=str(user.id)
         )
-        logger.info(f"🔍 Проверка фото: user.id={user.id}, photo_waiting_session={photo_waiting_session is not None}, has_photo={bool(update.message.photo)}")
+        
+        logger.info(f"🔍 Проверка фото: user.id={user.id}, photo_waiting={photo_waiting_session is not None}, has_photo={bool(update.message.photo)}")
+        
+        # Обработка фото для публикации
         if photo_waiting_session and update.message.photo:
             logger.info(f"📸 Получено фото для публикации от пользователя {user.id}")
             await self._handle_photo_for_publication(update, user.id)
@@ -1332,7 +1342,7 @@ class AINewsBot:
             await update.message.reply_text("❌ Произошла ошибка при обработке правок")
     
     async def _handle_photo_for_publication(self, update: Update, user_id: int):
-        """Обработка фото для публикации дайджеста."""
+        """Обработка фото для публикации дайджеста через User API."""
         try:
             logger.info(f"📸 Обработка фото для публикации от пользователя {user_id}")
             
@@ -1356,45 +1366,134 @@ class AINewsBot:
             
             logger.info(f"📸 Получено фото с file_id: {photo_file_id}")
             
-            # Публикуем дайджест с фото напрямую
+            # Скачиваем фото для User API
+            photo_path = f"temp_photo_{user_id}.jpg"
             try:
-                # Получаем токен бота и ID канала
-                bot_token = config.telegram.bot_token
+                photo_file = await self.application.bot.get_file(photo_file_id)
+                await photo_file.download_to_drive(photo_path)
+                logger.info(f"📥 Фото скачано: {photo_path}")
+                
+                # 🚀 НОВОЕ: Публикуем через User API вместо Bot API
+                from src.services.telegram_user_publisher import TelegramUserPublisher
+                
+                user_publisher = TelegramUserPublisher()  # Использует session_name из config (теперь "2")
+                
+                # Публикуем с фото и полным текстом в подписи (до 4096 символов!)
                 channel_id = config.telegram.channel_id
+                message_url = await user_publisher.publish_digest(
+                    channel_id=channel_id,
+                    content=digest_text,  # ПОЛНЫЙ ТЕКСТ БЕЗ ОГРАНИЧЕНИЙ!
+                    photo_path=photo_path
+                )
                 
-                # Обрезаем текст для подписи (лимит Telegram: 1024 символа)
-                max_caption_length = config.telegram.max_photo_caption_length
-                if len(digest_text) > max_caption_length:
-                    caption_text = digest_text[:max_caption_length - 3] + "..."
-                    logger.info(f"📝 Текст подписи обрезан с {len(digest_text)} до {len(caption_text)} символов")
+                # Отключаемся от User API
+                await user_publisher.disconnect()
+                
+                if message_url:
+                    # ✅ Убираем состояние ожидания фото из БД
+                    await self.session_service.delete_session(
+                        session_type='photo_waiting',
+                        user_id=str(user_id)
+                    )
+                    logger.info(f"🔄 Снято состояние ожидания фото из БД для пользователя {user_id}")
+                    
+                    await update.message.reply_text(
+                        f"🎉 <b>Дайджест успешно опубликован через User API!</b>\n\n"
+                        f"📸 Фото с полным текстом в подписи ({len(digest_text)} символов)\n"
+                        f"🔗 Ссылка: {message_url}",
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"✅ Дайджест опубликован через User API: {message_url}")
+                    
                 else:
-                    caption_text = digest_text
-                
-                # Отправляем фото с подписью
-                await self.application.bot.send_photo(
-                    chat_id=channel_id,
-                    photo=photo_file_id,
-                    caption=caption_text,
-                    parse_mode="HTML"
-                )
-                
-                # ✅ Убираем состояние ожидания фото из БД
-                await self.session_service.delete_session(
-                    session_type='photo_waiting',
-                    user_id=str(user_id)
-                )
-                logger.info(f"🔄 Снято состояние ожидания фото из БД для пользователя {user_id}")
-                
-                await update.message.reply_text("🎉 Дайджест успешно опубликован в канал с фото!")
-                logger.info(f"✅ Дайджест опубликован в канал")
+                    # Fallback на Bot API при ошибке User API
+                    logger.warning("⚠️ User API не сработал, используем fallback на Bot API")
+                    await self._fallback_bot_publication(digest_text, photo_file_id, channel_id, user_id, update)
                 
             except Exception as e:
-                await update.message.reply_text(f"❌ Ошибка публикации: {str(e)}")
-                logger.error(f"❌ Ошибка публикации дайджеста: {e}")
+                logger.error(f"❌ Ошибка публикации через User API: {e}")
+                # Fallback на Bot API при ошибке
+                await self._fallback_bot_publication(digest_text, photo_file_id, config.telegram.channel_id, user_id, update)
+                
+            finally:
+                # ВСЕГДА удаляем временный файл
+                try:
+                    import os
+                    if os.path.exists(photo_path):
+                        os.remove(photo_path)
+                        logger.info(f"🗑️ Временный файл удален: {photo_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"⚠️ Не удалось удалить временный файл: {cleanup_error}")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки фото для публикации: {e}")
             await update.message.reply_text("❌ Произошла ошибка при публикации дайджеста")
+    
+    async def _fallback_bot_publication(self, digest_text: str, photo_file_id: str, channel_id: str, user_id: int, update: Update):
+        """Fallback публикация через Bot API при ошибке User API"""
+        try:
+            logger.info("🔄 Fallback: публикация через Bot API")
+            
+            # 1. Отправляем фото без подписи
+            await self.application.bot.send_photo(
+                chat_id=channel_id,
+                photo=photo_file_id
+            )
+            logger.info(f"📸 Фото отправлено без подписи (Bot API)")
+            
+            # 2. Отправляем полный текст отдельным сообщением
+            clean_text = self._remove_title_from_digest(digest_text)
+            await self.application.bot.send_message(
+                chat_id=channel_id,
+                text=clean_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            logger.info(f"📝 Полный текст отправлен: {len(clean_text)} символов (Bot API)")
+            
+            # ✅ Убираем состояние ожидания фото из БД
+            await self.session_service.delete_session(
+                session_type='photo_waiting',
+                user_id=str(user_id)
+            )
+            logger.info(f"🔄 Снято состояние ожидания фото из БД для пользователя {user_id}")
+            
+            await update.message.reply_text(
+                "🎉 Дайджест опубликован через Bot API!\n"
+                "⚠️ User API недоступен, использован резервный метод"
+            )
+            logger.info(f"✅ Дайджест опубликован через Bot API (fallback)")
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка публикации (Bot API): {str(e)}")
+            logger.error(f"❌ Ошибка fallback публикации: {e}")
+    
+    def _remove_title_from_digest(self, digest_text: str) -> str:
+        """Удаляет заголовок из дайджеста, чтобы избежать дублирования."""
+        try:
+            lines = digest_text.split('\n')
+            cleaned_lines = []
+            
+            for line in lines:
+                line_stripped = line.strip()
+                # Пропускаем строки с заголовком (содержат 🤖 и "ИИ меняет мир")
+                if ('🤖' in line_stripped and 'ИИ меняет мир' in line_stripped):
+                    continue
+                # Пропускаем пустые строки в начале
+                if not line_stripped and not cleaned_lines:
+                    continue
+                cleaned_lines.append(line)
+            
+            # Убираем лишние пустые строки в начале
+            while cleaned_lines and not cleaned_lines[0].strip():
+                cleaned_lines.pop(0)
+            
+            return '\n'.join(cleaned_lines)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления заголовка: {e}")
+            return digest_text
+    
     
     async def _handle_edited_digest_approval(self, query, user_id: int):
         """Обработка одобрения исправленного дайджеста."""
@@ -1489,7 +1588,7 @@ class AINewsBot:
                     restored_count += 1
                     
                 elif session_type == 'photo_waiting':
-                    # Восстанавливаем состояние ожидания фото
+                    # Восстанавливаем состояние ожидания фото (старый формат)
                     await self._restore_photo_waiting_session(session)
                     restored_count += 1
                     
@@ -1624,6 +1723,7 @@ class AINewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка восстановления сессии модерации: {e}")
+    
 
 
 # ==================== ФУНКЦИЯ ЗАПУСКА ====================

@@ -261,7 +261,11 @@ class FinalDigestFormatterService:
             summary = self._create_ai_summary(news)
             logger.warning(f"⚠️ Создаем новое саммари с помощью AI для новости: {news.title[:50]}...")
         
-        news_text = f"{index}. {news.title}\n{summary}"
+        # Очищаем заголовок и саммари от звездочек
+        clean_title = self._clean_markdown_artifacts(news.title)
+        clean_summary = self._clean_markdown_artifacts(summary)
+        
+        news_text = f"{index}. {clean_title}\n{clean_summary}"
         
         # Интегрируем комментарий эксперта, если есть
         if comment:
@@ -370,9 +374,9 @@ class FinalDigestFormatterService:
             
             # Форматируем комментарий как в Telegram (зеленый блок с кавычками)
             formatted_comment = f"""
-"{comment_text}"
+<blockquote>"{comment_text}"
 
-— {expert_name}, {expert_title}
+— {expert_name}, {expert_title}</blockquote>
 """
             
             # Добавляем комментарий к новости
@@ -386,7 +390,7 @@ class FinalDigestFormatterService:
             # Fallback интеграция
             expert_title = self._get_expert_title(comment.get('expert', {}).get('specialization', 'AI'))
             expert_name = comment.get('expert', {}).get('name', 'Эксперт')
-            return f"{news_text}\n\n\"{comment.get('text', '')}\"\n\n— {expert_name}, {expert_title}"
+            return f"{news_text}\n\n<blockquote>\"{comment.get('text', '')}\"\n\n— {expert_name}, {expert_title}</blockquote>"
     
     def _format_sources(self, news: Dict, sources: List[str] = None) -> str:
         """
@@ -421,6 +425,39 @@ class FinalDigestFormatterService:
             return f"➡️ {sources_text}"
         
         return ""
+    
+    def _clean_markdown_artifacts(self, text: str) -> str:
+        """
+        Очищает текст от звездочек и других markdown артефактов.
+        
+        Args:
+            text: Исходный текст
+            
+        Returns:
+            Очищенный текст с HTML тегами
+        """
+        try:
+            # Убираем двойные звездочки ** и заменяем на HTML теги
+            import re
+            
+            # Заменяем **текст** на <b>текст</b>
+            text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+            
+            # Убираем одинарные звездочки *
+            text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
+            
+            # Убираем оставшиеся звездочки
+            text = text.replace('*', '')
+            
+            # Убираем лишние пробелы
+            text = re.sub(r'\s+', ' ', text).strip()
+            
+            logger.debug(f"🧹 Текст очищен от markdown артефактов")
+            return text
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки текста: {e}")
+            return text
     
     def _generate_conclusion(self, news_count: int) -> str:
         """

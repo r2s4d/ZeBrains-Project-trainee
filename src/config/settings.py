@@ -34,20 +34,32 @@ class DatabaseConfig:
 @dataclass
 class TelegramConfig:
     """Конфигурация Telegram."""
+    # Bot API (для интерактива)
     bot_token: str = ""
     curator_chat_id: str = ""
     channel_id: str = ""
     max_message_length: int = 4096
     max_photo_caption_length: int = 1024
     
+    # User API (для публикации) - уровень безопасности 1+2
+    api_id: Optional[int] = None
+    api_hash: str = ""
+    user_session_name: str = "AI_News_Curator"
+    
     def __post_init__(self):
         """Валидация конфигурации Telegram."""
+        # Bot API обязательные поля
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
         if not self.curator_chat_id:
             raise ValueError("CURATOR_CHAT_ID не установлен")
         if not self.channel_id:
             raise ValueError("CHANNEL_ID не установлен")
+        
+        # User API предупреждения (не обязательные)
+        if not self.api_id or not self.api_hash:
+            logger.warning("⚠️ User API не настроен (TELEGRAM_API_ID, TELEGRAM_API_HASH)")
+            logger.warning("📋 Публикация будет использовать только Bot API")
 
 
 @dataclass
@@ -164,11 +176,17 @@ class AppConfig:
                     password=os.getenv('DB_PASSWORD', '')
                 ),
                 telegram=TelegramConfig(
+                    # Bot API
                     bot_token=os.getenv('TELEGRAM_BOT_TOKEN', ''),
                     curator_chat_id=os.getenv('CURATOR_CHAT_ID', ''),
                     channel_id=os.getenv('CHANNEL_ID', ''),
                     max_message_length=int(os.getenv('MAX_MESSAGE_LENGTH', '4096')),
-                    max_photo_caption_length=int(os.getenv('MAX_PHOTO_CAPTION_LENGTH', '1024'))
+                    max_photo_caption_length=int(os.getenv('MAX_PHOTO_CAPTION_LENGTH', '1024')),
+                    
+                    # User API (безопасность уровня 1+2)
+                    api_id=int(os.getenv('TELEGRAM_API_ID', '0')) if os.getenv('TELEGRAM_API_ID') else None,
+                    api_hash=os.getenv('TELEGRAM_API_HASH', ''),
+                    user_session_name=os.getenv('TELEGRAM_USER_SESSION_NAME', 'AI_News_Curator')
                 ),
                 ai=AIConfig(
                     proxy_api_key=os.getenv('PROXY_API_KEY', ''),
