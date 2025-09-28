@@ -191,11 +191,20 @@ class SchedulerService:
         try:
             logger.info("🧹 Запуск автоматической очистки сессий...")
             
-            # Очищаем истекшие сессии
-            deleted_count = await bot_session_service.cleanup_expired_sessions()
+            # Очищаем истекшие сессии в БД
+            expired_count = await bot_session_service.cleanup_expired_sessions()
             
-            if deleted_count > 0:
-                logger.info(f"✅ Очистка сессий завершена: удалено {deleted_count} истекших сессий")
+            # Очищаем старые завершенные сессии (старше 7 дней)
+            old_count = await bot_session_service.cleanup_old_completed_sessions(days_old=7)
+            
+            # Очищаем файловые сессии дайджестов
+            if hasattr(self, 'morning_digest_service') and self.morning_digest_service:
+                # Метод _cleanup_old_sessions не существует, пропускаем
+                logger.info("🧹 Очистка файловых сессий дайджестов пропущена (метод не реализован)")
+            
+            total_deleted = expired_count + old_count
+            if total_deleted > 0:
+                logger.info(f"✅ Очистка сессий завершена: удалено {expired_count} истекших + {old_count} старых = {total_deleted} сессий")
             else:
                 logger.info("ℹ️ Очистка сессий: нет истекших сессий")
             

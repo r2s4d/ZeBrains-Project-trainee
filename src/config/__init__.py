@@ -4,7 +4,7 @@
 Модуль конфигурации AI News Assistant.
 """
 
-from .settings import config, AppConfig, DatabaseConfig, TelegramConfig, AIConfig, SecurityConfig, TimeoutConfig, MessageConfig, ExpertConfig
+from .settings import config, AppConfig, DatabaseConfig, TelegramConfig, AIConfig, SecurityConfig, TimeoutConfig, MessageConfig, ExpertConfig, DuplicateDetectionConfig
 
 __all__ = [
     'config',
@@ -15,5 +15,6 @@ __all__ = [
     'SecurityConfig',
     'TimeoutConfig',
     'MessageConfig',
-    'ExpertConfig'
+    'ExpertConfig',
+    'DuplicateDetectionConfig'
 ]

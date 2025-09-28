@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from src.models.database import BotSession
-from src.services.postgresql_database_service import PostgreSQLDatabaseService
+from src.services.database_singleton import get_database_service
 from src.services.telegram_security_service import TelegramSecurityService
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class TelegramSessionDBService:
     
     def __init__(self):
         """Инициализация сервиса"""
-        self.db = PostgreSQLDatabaseService()
+        self.db = get_database_service()
         self.security = TelegramSecurityService()
         self.session_type = 'telegram_user_session'
         logger.info("🗄️ Сервис БД сессий инициализирован")

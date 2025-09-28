@@ -98,13 +98,16 @@ class MorningDigestService:
                 
                 # Сохраняем саммари в БД
                 await self._save_summary_to_db(news.id, summary)
+
+                source_links = news.source_url or "Источник не указан"
+                logger.info(f"🔗 Источник для новости {news.id}: '{news.source_url}' -> '{source_links}'")
                 
                 # Создаем объект для дайджеста
                 digest_item = DigestNews(
                     id=news.id,
                     title=news.title,
                     summary=summary,
-                    source_links=news.source_url or "",
+                    source_links=source_links,
                     published_at=news.published_at or news.created_at,
                     curator_id=news.curator_id
                 )
@@ -356,10 +359,11 @@ class MorningDigestService:
             
             # Список новостей (по ФТ - только заголовок, саммари, источник)
             for i, news in enumerate(digest.news_items, 1):
+                logger.info(f"🔍 Форматируем новость {i}: source_links='{news.source_links}'")
                 formatted_digest += f"""
 <b>{i}. {news.title}</b>
 📝 {news.summary}
-➡️ Источник: {self._extract_channel_username(news.source_links) if news.source_links else 'Не указан'}
+➡️ Источник: {news.source_links if news.source_links else 'Не указан'}
 
 """
             
@@ -730,11 +734,8 @@ class MorningDigestService:
         
         for i, news in enumerate(digest.news_items):
             # Формируем текст новости
-            post_link = self._generate_post_link(news)
             news_text = f"""
-{i+1}. {news.title}
-📝 {news.summary}
-➡️ Источник: {post_link}
+{i+1}. {news.summary}
 
 """
             # news_text = self._escape_markdown(news_text)  # Отключаем экранирование
@@ -948,11 +949,10 @@ class MorningDigestService:
         # Список новостей
         news_list = ""
         for i, news in enumerate(digest.news_items, 1):
-            post_link = self._generate_post_link(news)
+            logger.info(f"🔍 Форматируем новость {i}: source_links='{news.source_links}'")
             news_list += f"""
-{i}. {news.title}
-📝 {news.summary}
-➡️ Источник: {post_link}
+{i}. {news.summary}
+➡️ Источник: {news.source_links if news.source_links else 'Не указан'}
 
 """
         
@@ -1169,80 +1169,6 @@ on💡 ИНСТРУКЦИИ:
             logger.error(f"❌ Ошибка простой очистки: {e}")
             return False
     
-    async def _delete_digest_messages_by_content(self, chat_id: str) -> int:
-        """
-        Удаляет сообщения дайджеста по содержимому.
-        
-        Args:
-            chat_id: ID чата
-            
-        Returns:
-            int: Количество удаленных сообщений
-        """
-        try:
-            if not self.bot:
-                return 0
-            
-            logger.info(f"🔍 Ищем сообщения дайджеста по содержимому в чате {chat_id}")
-            
-            # Получаем последние сообщения
-            messages = await self.bot.get_chat_history(chat_id, limit=20)
-            
-            deleted_count = 0
-            for msg in messages:
-                if msg.text and any(keyword in msg.text for keyword in [
-                    "УТРЕННИЙ ДАЙДЖЕСТ", 
-                    "НОВОСТИ ДЛЯ МОДЕРАЦИИ", 
-                    "🗑️ Удалить",
-                    "✅ Одобрить оставшиеся"
-                ]):
-                    try:
-                        await self.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-                        deleted_count += 1
-                        logger.info(f"🗑️ Удалено сообщение дайджеста по содержимому: {msg.message_id}")
-                        await asyncio.sleep(0.1)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Не удалось удалить сообщение {msg.message_id}: {e}")
-                        continue
-            
-            logger.info(f"✅ Удалено {deleted_count} сообщений дайджеста по содержимому")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка удаления по содержимому: {e}")
-            return 0
-
-    async def _delete_message_by_content(self, chat_id: str, message_id: int) -> bool:
-        """
-        Удаляет сообщение по содержимому, если не удалось по ID.
-        
-        Args:
-            chat_id: ID чата
-            message_id: ID сообщения
-            
-        Returns:
-            bool: Успешность удаления
-        """
-        try:
-            # Получаем последние сообщения и ищем дайджест
-            messages = await self.bot.get_chat_history(chat_id, limit=50)
-            
-            for msg in messages:
-                if (msg.message_id == message_id and 
-                    any(keyword in msg.text for keyword in ["УТРЕННИЙ ДАЙДЖЕСТ", "НОВОСТИ ДЛЯ МОДЕРАЦИИ", "🗑️ Удалить"])):
-                    try:
-                        await self.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-                        logger.info(f"🗑️ Удалено сообщение дайджеста по содержимому: {msg.message_id}")
-                        return True
-                    except Exception as e:
-                        logger.warning(f"⚠️ Не удалось удалить сообщение {msg.message_id}: {e}")
-                        return False
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка удаления сообщения по содержимому: {e}")
-            return False
 
     async def _delete_all_digest_messages_in_chat(self, chat_id: str) -> int:
         """
@@ -1286,11 +1212,6 @@ on💡 ИНСТРУКЦИИ:
                     except Exception as e:
                         logger.warning(f"⚠️ Не удалось удалить сообщение сессии {msg_id}: {e}")
                         continue
-            
-            # Если не удалось удалить по ID, удаляем по содержимому
-            if deleted_count == 0:
-                logger.info(f"🔍 Удаление по ID не удалось, удаляем по содержимому...")
-                deleted_count = await self._delete_digest_messages_by_content(chat_id)
             
             if deleted_count == 0:
                 logger.warning(f"⚠️ Не удалось удалить ни одного сообщения дайджеста")

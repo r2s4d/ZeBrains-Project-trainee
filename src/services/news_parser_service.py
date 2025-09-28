@@ -3,7 +3,7 @@ NewsParserService - сервис для автоматического парс�
 
 Этот сервис:
 1. Парсит все источники новостей каждый час (активные часы) и 4 часа (ночные)
-2. Объединяет дубликаты с уникальными индексами # придумать логику поумнее
+2. Использует DuplicateDetectionService для умного поиска дубликатов
 3. Интегрируется с существующей системой
 
 """
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from src.services.postgresql_database_service import PostgreSQLDatabaseService
 from src.services.telegram_channel_parser import TelegramChannelParser
 from src.services.ai_analysis_service import AIAnalysisService
+from src.services.duplicate_detection_service import DuplicateDetectionService
 from src.models.database import Source, News, NewsSource
 
 # Настройка логирования
@@ -40,7 +41,7 @@ class NewsParserService:
     Принципы работы:
     1. Парсит все источники каждый час (днем) и 4 часа (ночью)
     2. Использует AI для анализа важности
-    3. Объединяет дубликаты с множественными источниками # глубже продумать логику.
+    3. Использует DuplicateDetectionService для умного поиска дубликатов
     4. Создает задания для кураторов и экспертов
     5. Реальный парсинг через Telegram API
     """
@@ -59,6 +60,7 @@ class NewsParserService:
         """
         self.db = database_service
         self.ai_analysis = ai_analysis_service
+        self.duplicate_detector = DuplicateDetectionService()
         
         # Инициализируем Telegram парсер
         self.telegram_parser = None
@@ -195,29 +197,66 @@ class NewsParserService:
             
             for news_data_item in news_data:
                 try:
-                    # Проверяем на дубликаты
-                    duplicate_info = self._detect_duplicates(
-                        news_data_item["title"], 
-                        news_data_item["content"]
+                    # 1. СНАЧАЛА проверяем релевантность новости через AI
+                    title = news_data_item["title"]
+                    content = news_data_item["content"]
+                    
+                    # Проверяем релевантность только если AI сервис доступен
+                    is_relevant = True  # По умолчанию считаем релевантной
+                    relevance_score = None  # Инициализируем переменную
+                    if self.ai_analysis:
+                        try:
+                            relevance_score = await self.ai_analysis.analyze_news_relevance(title, content)
+                            
+                            if relevance_score is not None and relevance_score >= 6:
+                                is_relevant = True
+                                logger.info(f"✅ Новость релевантна: {relevance_score}/10 - '{title[:50]}...'")
+                            else:
+                                is_relevant = False
+                                logger.info(f"❌ Новость нерелевантна: {relevance_score}/10 - '{title[:50]}...'")
+                                
+                        except Exception as e:
+                            logger.warning(f"⚠️ Ошибка AI анализа релевантности: {e}")
+                            # При ошибке AI считаем новость релевантной (fallback)
+                            is_relevant = True
+                            relevance_score = None  # Сбрасываем оценку при ошибке
+                            logger.info(f"✅ Новость включена по fallback (ошибка AI): '{title[:50]}...'")
+                    
+                    # 2. Если новость нерелевантна - пропускаем её
+                    if not is_relevant:
+                        logger.info(f"⏭️ Пропускаем нерелевантную новость: '{title[:50]}...'")
+                        continue
+                    
+                    # 3. ТОЛЬКО для релевантных новостей проверяем на дубликаты
+                    duplicate_result = await self.duplicate_detector.detect_duplicates(
+                        title, 
+                        content,
+                        filter_relevant=True  # Только релевантные новости
                     )
                     
-                    if duplicate_info["is_duplicate"]:
+                    if duplicate_result.is_duplicate:
                         # Объединяем с существующей новостью
-                        await self._merge_duplicate_news(
-                            duplicate_info["existing_news_id"],
+                        success = await self.duplicate_detector.merge_duplicate_sources(
+                            duplicate_result.existing_news_id,
                             source.id,
                             news_data_item.get("source_url")
                         )
-                        logger.info(f"🔄 Объединили дубликат: {news_data_item['title']}")
+                        
+                        if success:
+                            logger.info(f"🔄 Объединили дубликат: {news_data_item['title']} "
+                                      f"(тип: {duplicate_result.similarity_type}, "
+                                      f"схожесть: {duplicate_result.similarity_score:.3f})")
+                        else:
+                            logger.error(f"❌ Ошибка объединения дубликата: {news_data_item['title']}")
                     else:
-                        # Создаем простую новость 
+                        # Создаем новую новость с оценкой релевантности
                         news = await self._create_simple_news_from_parsed(
                             news_data_item, 
-                            source.id
+                            source.id,
+                            relevance_score=relevance_score
                         )
                         
                         if news:
-                            # НЕ назначаем куратора - по ФТ кураторы сами фильтруют в дайджесте
                             processed_count += 1
                             
                             logger.info(f"✅ Создана новость: {news.title}")
@@ -232,107 +271,12 @@ class NewsParserService:
             logger.error(f"❌ Ошибка парсинга канала {source.telegram_id}: {e}")
             return 0
     
-    def _detect_duplicates(self, title: str, content: str) -> Dict[str, any]:
-        """
-        Проверяет новость на дубликаты.
-        
-        Args:
-            title: Заголовок новости
-            content: Содержимое новости
-            
-        Returns:
-            Dict с информацией о дубликатах
-        """
-        try:
-            # Получаем все новости из базы
-            all_news = self.db.get_all_news()
-            
-            for news in all_news:
-                # Простая проверка по заголовку (можно улучшить)
-                if self._is_similar_title(title, news.title):
-                    return {
-                        "is_duplicate": True,
-                        "existing_news_id": news.id,
-                        "similarity_score": 0.9,
-                        "reason": "Похожий заголовок"
-                    }
-            
-            return {
-                "is_duplicate": False,
-                "existing_news_id": None,
-                "similarity_score": 0.0,
-                "reason": "Дубликатов не найдено"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка проверки дубликатов: {e}")
-            return {
-                "is_duplicate": False,
-                "existing_news_id": None,
-                "similarity_score": 0.0,
-                "reason": "Ошибка проверки"
-            }
-    
-    def _is_similar_title(self, title1: str, title2: str) -> bool:
-        """
-        Проверяет, похожи ли заголовки.
-        
-        Простая реализация - можно улучшить с помощью AI.
-        """
-        # Приводим к нижнему регистру и убираем лишние символы
-        clean_title1 = "".join(c.lower() for c in title1 if c.isalnum() or c.isspace())
-        clean_title2 = "".join(c.lower() for c in title2 if c.isalnum() or c.isspace())
-        
-        # Разбиваем на слова
-        words1 = set(clean_title1.split())
-        words2 = set(clean_title2.split())
-        
-        # Вычисляем схожесть по формуле Жаккара
-        intersection = len(words1.intersection(words2))
-        union = len(words1.union(words2))
-        
-        if union == 0:
-            return False
-        
-        similarity = intersection / union
-        return similarity > 0.7  # Порог схожести
-    
-    async def _merge_duplicate_news(
-        self, 
-        existing_news_id: int, 
-        new_source_id: int, 
-        new_url: Optional[str]
-    ):
-        """
-        Объединяет дубликат с существующей новостью.
-        
-        Args:
-            existing_news_id: ID существующей новости
-            new_source_id: ID нового источника
-            new_url: URL новой новости
-        """
-        try:
-            # Создаем связь между существующей новостью и новым источником
-            news_source = NewsSource(
-                news_id=existing_news_id,
-                source_id=new_source_id,
-                source_url=new_url
-            )
-            
-            # Добавляем в базу данных
-            with self.db.get_session() as session:
-                session.add(news_source)
-                session.commit()
-            
-            logger.info(f"✅ Объединили дубликат: новость {existing_news_id} + источник {new_source_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка объединения дубликата: {e}")
     
     async def _create_simple_news_from_parsed(
         self, 
         news_data: Dict, 
-        source_id: int
+        source_id: int,
+        relevance_score: Optional[int] = None
     ) -> Optional[News]:
         """
         Создает простую новость в базе данных из распарсенных данных Telegram.
@@ -340,12 +284,13 @@ class NewsParserService:
         Args:
             news_data: Данные новости из Telegram
             source_id: ID источника новости
+            relevance_score: Оценка релевантности новости (0-10)
             
         Returns:
             News: Созданная новость или None при ошибке
         """
         try:
-            # Создаем простую новость без AI анализа
+            # Создаем новость с AI анализом релевантности
             news = News(
                 title=news_data["title"],
                 content=news_data["content"],
@@ -358,8 +303,9 @@ class NewsParserService:
                 source_channel_username=news_data.get("source_channel_username"),
                 source_url=news_data.get("source_url"),
                 raw_content=news_data.get("raw_content"),
-                # Базовые значения без AI анализа
-                ai_summary=None
+                # AI анализ
+                ai_summary=None,
+                ai_relevance_score=relevance_score  # Сохраняем оценку релевантности
             )
             
             # Добавляем в базу данных

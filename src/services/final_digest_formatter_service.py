@@ -45,7 +45,7 @@ class FinalDigestFormatterService:
         
         logger.info("FinalDigestFormatterService инициализирован")
     
-    def create_final_digest(
+    async def create_final_digest(
         self,
         approved_news: List,
         expert_comments: Dict[int, Dict],
@@ -70,16 +70,17 @@ class FinalDigestFormatterService:
             title = self._create_title(approved_news)
             
             # 2. Создаем персонализированное введение
-            introduction = self._generate_introduction(expert_of_week, len(approved_news))
+            introduction = await self._generate_introduction(expert_of_week, len(approved_news))
             
             # 3. Сохраняем источники для использования в форматировании
             self._current_sources = news_sources or {}
+            logger.info(f"🔍 Отладка источников в FinalDigestFormatterService: {self._current_sources}")
             
             # 4. Форматируем новости с комментариями
-            news_section = self._format_news_section(approved_news, expert_comments)
+            news_section = await self._format_news_section(approved_news, expert_comments)
             
             # 5. Создаем персонализированное заключение
-            conclusion = self._generate_conclusion(len(approved_news))
+            conclusion = await self._generate_conclusion(len(approved_news))
             
             # 6. Собираем полный дайджест
             full_digest = f"{title}\n\n{introduction}\n\n{news_section}\n{conclusion}"
@@ -114,7 +115,7 @@ class FinalDigestFormatterService:
         title = "ИИ меняет мир: главные новости недели"
         
         # Форматируем по ТЗ (жирный шрифт в Telegram)
-        return f"**{emoji} {title}**"
+        return f"<b>{emoji} {title}</b>"
     
     def _get_title_emoji(self, news_items: List[News]) -> str:
         """
@@ -143,7 +144,7 @@ class FinalDigestFormatterService:
         else:
             return "📰"  # Общие новости
     
-    def _generate_introduction(self, expert: Expert, news_count: int) -> str:
+    async def _generate_introduction(self, expert: Expert, news_count: int) -> str:
         """
         Создает персонализированное введение с помощью AI.
         
@@ -186,7 +187,7 @@ class FinalDigestFormatterService:
             Создай уникальное введение в этом стиле.
             """
             
-            introduction = self.ai_service.analyze_text(prompt)
+            introduction = await self.ai_service.analyze_text(prompt)
             logger.info("✅ Персонализированное введение создано с помощью AI")
             return introduction
             
@@ -196,7 +197,7 @@ class FinalDigestFormatterService:
             expert_title = self._get_expert_title(expert.get('specialization', 'AI'))
             return f"Привет! Я {self.digital_employee_name}, {self.digital_employee_role}. На этой неделе разбираем новости ИИ вместе с {expert.get('name', 'Эксперт')}, {expert_title}."
     
-    def _format_news_section(self, news_items: List[Dict], expert_comments: Dict[int, Dict]) -> str:
+    async def _format_news_section(self, news_items: List[Dict], expert_comments: Dict[int, Dict]) -> str:
         """
         Форматирует секцию новостей с комментариями экспертов.
         
@@ -230,12 +231,12 @@ class FinalDigestFormatterService:
                 logger.info(f"📝 Комментарий: {comment.get('text', '')[:100]}...")
             
             # Форматируем новость
-            news_text = self._format_single_news(news, comment, i)
+            news_text = await self._format_single_news(news, comment, i)
             news_section += news_text + "\n\n"
         
         return news_section.strip()
     
-    def _format_single_news(self, news: Dict, comment: Optional[Dict], index: int) -> str:
+    async def _format_single_news(self, news: Dict, comment: Optional[Dict], index: int) -> str:
         """
         Форматирует одну новость с комментарием эксперта.
         
@@ -258,14 +259,13 @@ class FinalDigestFormatterService:
             logger.info(f"⚠️ Используем fallback саммари для новости: {news.title[:50]}...")
         else:
             # Последний fallback: создаем саммари с помощью AI
-            summary = self._create_ai_summary(news)
+            summary = await self._create_ai_summary(news)
             logger.warning(f"⚠️ Создаем новое саммари с помощью AI для новости: {news.title[:50]}...")
         
         # Очищаем заголовок и саммари от звездочек
-        clean_title = self._clean_markdown_artifacts(news.title)
         clean_summary = self._clean_markdown_artifacts(summary)
         
-        news_text = f"{index}. {clean_title}\n{clean_summary}"
+        news_text = f"{index}. {clean_summary}"
         
         # Интегрируем комментарий эксперта, если есть
         if comment:
@@ -275,13 +275,18 @@ class FinalDigestFormatterService:
         # Добавляем источники (если переданы)
         if hasattr(self, '_current_sources') and self._current_sources:
             news_id = news.get('id') if isinstance(news, dict) else news.id
-            sources_text = self._format_sources(news, self._current_sources.get(news_id))
+            sources_for_news = self._current_sources.get(news_id)
+            logger.info(f"🔍 Источники для новости {news_id}: {sources_for_news}")
+            sources_text = self._format_sources(news, sources_for_news)
             if sources_text:
                 news_text += f"\n\n{sources_text}"
+                logger.info(f"✅ Добавлены источники к новости {news_id}: {sources_text}")
+            else:
+                logger.warning(f"⚠️ Не удалось отформатировать источники для новости {news_id}")
         
         return news_text
     
-    def _create_ai_summary(self, news: Dict, existing_summary: str = None) -> str:
+    async def _create_ai_summary(self, news: Dict, existing_summary: str = None) -> str:
         """
         Создает качественное саммари новости с помощью AI (максимум 100 слов).
         
@@ -329,7 +334,7 @@ class FinalDigestFormatterService:
                 Верни только саммари без дополнительных комментариев.
                 """
             
-            summary = self.ai_service.analyze_text(prompt)
+            summary = await self.ai_service.analyze_text(prompt)
             
             # Проверяем, что саммари не превышает 100 слов
             words = summary.split()
@@ -408,15 +413,24 @@ class FinalDigestFormatterService:
             Отформатированные источники
         """
         if sources:
-            # Источники уже приходят в формате [Название](https://t.me/channel) из get_news_sources
+            # Источники могут приходить в HTML формате из get_news_sources
             formatted_sources = []
             for source in sources[:3]:  # Максимум 3 источника
-                if source.startswith('[') and '](' in source:
-                    # Если это уже готовая Markdown ссылка, используем как есть
+                if source.startswith('<a href=') and '</a>' in source:
+                    # Если это HTML ссылка, используем как есть (оставляем в HTML формате)
                     formatted_sources.append(source)
+                elif source.startswith('[') and '](' in source:
+                    # Если это уже готовая Markdown ссылка, конвертируем в HTML для совместимости
+                    import re
+                    match = re.search(r'\[([^\]]+)\]\(([^)]+)\)', source)
+                    if match:
+                        text, url = match.groups()
+                        formatted_sources.append(f'<a href="{url}">{text}</a>')
+                    else:
+                        formatted_sources.append(source)
                 elif source.startswith('http'):
-                    # Если это URL, создаем гиперссылку
-                    formatted_sources.append(f"[Источник]({source})")
+                    # Если это URL, создаем HTML ссылку напрямую
+                    formatted_sources.append(f'<a href="{source}">Источник</a>')
                 else:
                     # Если это просто текст, используем как есть
                     formatted_sources.append(source)
@@ -459,7 +473,7 @@ class FinalDigestFormatterService:
             logger.error(f"❌ Ошибка очистки текста: {e}")
             return text
     
-    def _generate_conclusion(self, news_count: int) -> str:
+    async def _generate_conclusion(self, news_count: int) -> str:
         """
         Создает персонализированное заключение с помощью AI.
         
@@ -495,7 +509,7 @@ class FinalDigestFormatterService:
             Создай уникальное заключение в этом стиле.
             """
             
-            conclusion = self.ai_service.analyze_text(prompt)
+            conclusion = await self.ai_service.analyze_text(prompt)
             logger.info("✅ Персонализированное заключение создано с помощью AI")
             return conclusion
             

@@ -12,7 +12,9 @@ from telethon.errors import FloodWaitError, ChannelPrivateError, ChatAdminRequir
 
 from src.config.telegram_config import TelegramConfig
 from src.models.database import News, Source
-from src.services.postgresql_database_service import PostgreSQLDatabaseService
+from src.services.database_singleton import get_database_service
+from src.utils.timeout_utils import with_timeout, HTTP_REQUEST_TIMEOUT
+from src.utils.retry_utils import http_retry, http_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,7 @@ class TelegramChannelParser:
     def __init__(self):
         """Инициализация парсера."""
         self.client = None
-        self.db_service = PostgreSQLDatabaseService()
+        self.db_service = get_database_service()
         
         # Проверяем конфигурацию
         if not TelegramConfig.validate_config():
@@ -61,6 +63,8 @@ class TelegramChannelParser:
             await self.client.disconnect()
             logger.info("🔌 Отключение от Telegram API")
     
+    @http_retry
+    @http_circuit_breaker
     async def parse_channel(self, channel_username: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Парсинг конкретного канала.
@@ -81,8 +85,13 @@ class TelegramChannelParser:
                 logger.error(f"❌ Канал @{channel_username} не найден")
                 return []
             
-            # Получаем сообщения
-            messages = await self.client.get_messages(channel, limit=limit)
+            # Получаем сообщения с таймаутом
+            messages = await with_timeout(
+                self.client.get_messages(channel, limit=limit),
+                timeout_seconds=HTTP_REQUEST_TIMEOUT,
+                operation_name=f"получение сообщений из @{channel_username}",
+                fallback_value=[]
+            )
             logger.info(f"📱 Получено {len(messages)} сообщений из @{channel_username}")
             
             # Извлекаем новости из сообщений
@@ -143,8 +152,19 @@ class TelegramChannelParser:
                 logger.debug(f"⏰ Пропускаем старое сообщение: {message_time} (разница: {time_difference})")
                 return None
             
-            # Извлекаем заголовок (первые 100 символов)
-            title = message.text[:100].strip()
+            # Извлекаем полный заголовок
+            full_text = message.text.strip()
+            # Находим первые два предложения или новые строки как заголовок
+            sentences = full_text.split('. ')
+            if len(sentences) >= 2:
+                title = (sentences[0] + '. ' + sentences[1]).strip()
+            else:
+                lines = full_text.split('\n')
+                if len(lines) > 1:
+                    title = lines[0].strip()
+                else:
+                    title = full_text[:200].strip()  # Максимум 200 символов
+            
             if title.endswith('...'):
                 title = title[:-3]
             

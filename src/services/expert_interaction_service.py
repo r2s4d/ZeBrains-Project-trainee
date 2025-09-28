@@ -182,7 +182,7 @@ class ExpertInteractionService:
                 session_type='expert_comment',
                 user_id=comment_id,
                 data=comment_data,
-                expires_at=datetime.now() + timedelta(days=7)  # Комментарии храним дольше
+                expires_at=datetime.now() + timedelta(hours=2)  # Комментарии храним 2 часа
             )
             
         except Exception as e:
@@ -381,8 +381,7 @@ class ExpertInteractionService:
             source = self._clean_html_text(news.get('source_links', 'Не указан'))
             
             news_text = f"""
-<b>{i+1}. {title}</b>
-📝 {summary}
+{i+1}. {summary}
 ➡️ Источник: {source}
 
 """
@@ -616,10 +615,13 @@ class ExpertInteractionService:
             # Уведомляем кураторов и создаем финальный дайджест
             await self._notify_curators_completion(expert_id)
             
-            # Очищаем сессию
+            # Очищаем сессию эксперта
             session = await self._get_expert_session(expert_id)
             if session:
                 await self._delete_expert_session(expert_id)
+            
+            # ✅ НОВОЕ: Очищаем ВСЕ сессии expert_comment для этого эксперта
+            await self._cleanup_expert_comments(expert_id)
             
             logger.info(f"✅ Эксперт {expert_id} уведомлен о завершении работы")
             
@@ -671,13 +673,13 @@ class ExpertInteractionService:
             # Импортируем необходимые сервисы
             from src.services.final_digest_formatter_service import FinalDigestFormatterService
             from src.services.curator_approval_service import CuratorApprovalService
-            from src.services.postgresql_database_service import PostgreSQLDatabaseService
+            from src.services.database_singleton import get_database_service
             from src.services.ai_analysis_service import AIAnalysisService
             
             # Инициализируем сервисы
             ai_service = AIAnalysisService()  # ProxyAPI уже инициализируется в конструкторе
             formatter_service = FinalDigestFormatterService(ai_service)
-            database_service = PostgreSQLDatabaseService()
+            database_service = get_database_service()
             
             # Получаем данные из текущей сессии эксперта
             session = await self._get_expert_session(expert_id)
@@ -705,7 +707,7 @@ class ExpertInteractionService:
             logger.info(f"📊 Получено данных: {len(approved_news)} новостей, эксперт: {expert_of_week.name if expert_of_week else 'None'}")
             
             # Создаем финальный дайджест
-            formatted_digest = formatter_service.create_final_digest(
+            formatted_digest = await formatter_service.create_final_digest(
                 approved_news=approved_news,
                 expert_of_week=expert_of_week,
                 expert_comments=expert_comments,
@@ -924,6 +926,30 @@ class ExpertInteractionService:
             logger.error(f"❌ Ошибка получения комментариев к новости {news_id}: {e}")
             return []
     
+    async def _cleanup_expert_comments(self, expert_id: int):
+        """Очищает все сессии expert_comment для указанного эксперта."""
+        try:
+            # Получаем все активные сессии expert_comment
+            all_comments = await self.session_service.get_active_sessions('expert_comment')
+            
+            deleted_count = 0
+            for comment_session in all_comments:
+                data = comment_session.get('data', {})
+                if data.get('expert_id') == expert_id:
+                    # Удаляем сессию комментария
+                    comment_id = comment_session.get('user_id')
+                    await self.session_service.delete_session(
+                        session_type='expert_comment',
+                        user_id=comment_id
+                    )
+                    deleted_count += 1
+            
+            if deleted_count > 0:
+                logger.info(f"🧹 Очищено {deleted_count} сессий expert_comment для эксперта {expert_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки сессий expert_comment для эксперта {expert_id}: {e}")
+
     async def cleanup_session(self, expert_id: int):
         """Очищает сессию эксперта."""
         session = await self._get_expert_session(expert_id)

@@ -308,6 +308,44 @@ class BotSessionService:
             logger.error(f"❌ Ошибка очистки истекших сессий: {e}")
             return 0
     
+    async def cleanup_old_completed_sessions(self, days_old: int = 7) -> int:
+        """
+        Очищает старые завершенные сессии.
+        
+        Args:
+            days_old: Количество дней, после которых сессии считаются старыми
+            
+        Returns:
+            int: Количество удаленных сессий
+        """
+        try:
+            with self.get_session() as session:
+                cutoff_date = datetime.now() - timedelta(days=days_old)
+                
+                # Находим старые завершенные сессии
+                old_sessions = session.query(BotSession).filter(
+                    and_(
+                        BotSession.status == 'completed',
+                        BotSession.updated_at < cutoff_date
+                    )
+                ).all()
+                
+                # Удаляем их
+                for bot_session in old_sessions:
+                    session.delete(bot_session)
+                
+                session.commit()
+                
+                count = len(old_sessions)
+                if count > 0:
+                    logger.info(f"🧹 Очищено {count} старых завершенных сессий (старше {days_old} дней)")
+                
+                return count
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки старых сессий: {e}")
+            return 0
+    
     async def get_session_stats(self) -> Dict[str, Any]:
         """
         Получает статистику сессий.
@@ -337,7 +375,7 @@ class BotSessionService:
                 
                 # Сессии по типам
                 session_types = {}
-                for session_type in ['digest_edit', 'photo_wait', 'expert_session', 'curator_moderation', 'current_digest']:
+                for session_type in ['digest_edit', 'photo_wait', 'expert_session', 'curator_moderation', 'current_digest', 'expert_comment']:
                     count = session.query(BotSession).filter(
                         BotSession.session_type == session_type
                     ).count()

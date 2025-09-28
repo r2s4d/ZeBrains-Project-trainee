@@ -359,17 +359,19 @@ class PostgreSQLDatabaseService:
                             if source:
                                 unique_sources.add(source)
                         
-                        # Создаем одну ссылку на источник (первый уникальный)
+                        # Создаем ссылки на все уникальные источники
                         if unique_sources:
-                            source = list(unique_sources)[0]  # Берем первый уникальный источник
-                            if source.telegram_id:
-                                # Форматируем как @channel_name с HTML-ссылкой на канал
-                                clean_telegram_id = source.telegram_id.lstrip('@')
-                                source_link = f'<a href="https://t.me/{clean_telegram_id}">@{clean_telegram_id}</a>'
-                            else:
-                                source_link = source.name
-                            sources_dict[news.id] = [source_link]  # Одна ссылка на источник
-                            logger.debug(f"✅ Новость {news.id}: источник {source_link}")
+                            source_links = []
+                            for source in unique_sources:
+                                if source.telegram_id:
+                                    # Форматируем как @channel_name с HTML-ссылкой на канал
+                                    clean_telegram_id = source.telegram_id.lstrip('@')
+                                    source_link = f'<a href="https://t.me/{clean_telegram_id}">@{clean_telegram_id}</a>'
+                                else:
+                                    source_link = source.name
+                                source_links.append(source_link)
+                            sources_dict[news.id] = source_links  # Все ссылки на источники
+                            logger.debug(f"✅ Новость {news.id}: источники {', '.join(source_links)}")
                         else:
                             sources_dict[news.id] = ["Неизвестный источник"]
                             logger.warning(f"❌ Новость {news.id}: нет источников")

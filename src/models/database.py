@@ -52,6 +52,7 @@ class News(Base):
     
     # Поля для AI анализа
     ai_summary = Column(Text, nullable=True)  # AI-генерированное саммари
+    ai_relevance_score = Column(Integer, nullable=True)  # AI-оценка релевантности (0-10)
 
     def __repr__(self):
         # Метод для красивого отображения объекта News при печати

@@ -23,7 +23,7 @@ DATABASE_URL = f"postgresql://{config.database.user}:{config.database.password}@
 # Это основной объект для работы с базой данных
 engine = create_engine(
     DATABASE_URL,
-    echo=True,  # Показывать SQL-запросы в консоли (полезно для отладки)
+    echo=False,  # Отключаем избыточное логирование SQL-запросов
     pool_size=5,  # Количество соединений в пуле
     max_overflow=10  # Максимальное количество дополнительных соединений
 )

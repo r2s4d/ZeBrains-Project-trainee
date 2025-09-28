@@ -5,6 +5,7 @@ AI анализ новостей с использованием OpenAI API.
 Обновленная версия: объединенный промпт для саммари и анализа.
 """
 
+import asyncio
 import logging
 import os
 import hashlib
@@ -14,6 +15,8 @@ from dataclasses import dataclass
 from openai import OpenAI
 from src.config import config
 from src.services.sqlite_cache_service import cache, get_cache_key
+from src.utils.timeout_utils import with_timeout, AI_REQUEST_TIMEOUT
+from src.utils.retry_utils import ai_retry, ai_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,8 @@ class AIAnalysisService:
         logger.info("✅ AIAnalysisService инициализирован")
     
     
+    @ai_retry
+    @ai_circuit_breaker
     async def generate_summary_only(self, title: str, content: str) -> str:
         """
         Генерирует только краткое саммари новости.
@@ -96,37 +101,37 @@ class AIAnalysisService:
             if self.use_proxy and self.client:
                 logger.info("🚀 Используем ProxyAPI для генерации саммари")
                 
-                # Создаем промпт для саммари
+                # Создаем промпт для саммари (БЕЗ заголовка)
                 summary_prompt = f"""
-                Создай привлекательный заголовок и краткое саммари для новости об ИИ:
+                Создай краткое саммари для новости об ИИ (БЕЗ заголовка):
 
-                ИСХОДНЫЙ ЗАГОЛОВОК: {title}
                 СОДЕРЖАНИЕ: {content}
 
                 ТРЕБОВАНИЯ:
-                1. ЗАГОЛОВОК: 
-                   - Максимум 80 символов
-                   - Привлекательный и законченный (не обрезанный)
-                   - Начинать с эмодзи (🤖, 🚀, 💡, ⚡, 🔬)
-                   - БЕЗ звездочек ** - использовать только HTML теги <b></b>
+                - Объем: 1-3 предложения (50-100 слов)
+                - Краткое описание сути без лишних деталей
+                - Только ключевые факты
+                - НЕ включай заголовок в саммари
+                - БЕЗ звездочек ** - использовать только HTML теги <b></b> для выделения
 
-                2. САММАРИ:
-                   - Объем: 1-3 предложения (50-100 слов)
-                   - Краткое описание сути без лишних деталей
-                   - Только ключевые факты
-                   - БЕЗ звездочек ** - использовать только HTML теги <b></b>
-
-                ФОРМАТ ОТВЕТА:
-                🤖 <b>Привлекательный заголовок новости</b>
-
+                ФОРМАТ ОТВЕТА (только саммари):
                 Краткое саммари в 1-3 предложения с ключевыми фактами.
                 """
                 
-                # Вызываем OpenAI API через прокси
+                # Вызываем OpenAI API через прокси с таймаутом
                 try:
-                    response = self.client.chat.completions.create(
-                        model=config.ai.model,
-                        messages=[{"role": "user", "content": summary_prompt}]
+                    loop = asyncio.get_event_loop()
+                    response = await with_timeout(
+                        loop.run_in_executor(
+                            None,
+                            lambda: self.client.chat.completions.create(
+                                model=config.ai.model,
+                                messages=[{"role": "user", "content": summary_prompt}]
+                            )
+                        ),
+                        timeout_seconds=AI_REQUEST_TIMEOUT,
+                        operation_name="генерация саммари",
+                        fallback_value=None
                     )
                     
                     summary = response.choices[0].message.content.strip()
@@ -156,7 +161,7 @@ class AIAnalysisService:
             logger.error(f"❌ Ошибка генерации саммари: {e}")
             return f"Краткое саммари: {title}"
     
-    def analyze_text(self, prompt: str) -> str:
+    async def analyze_text(self, prompt: str) -> str:
         """
         Анализирует текст с помощью AI для генерации контента.
         
@@ -180,13 +185,22 @@ class AIAnalysisService:
             # Используем ProxyAPI для генерации текста
             if hasattr(self, 'use_proxy') and self.use_proxy and self.client:
                 try:
-                    # Синхронный вызов к ProxyAPI
-                    response = self.client.chat.completions.create(
-                        model=config.ai.model,
-                        messages=[
-                            {"role": "system", "content": "Ты - профессиональный SMM-менеджер, создающий качественный контент для дайджестов новостей об ИИ."},
-                            {"role": "user", "content": prompt}
-                        ]
+                    # Синхронный вызов к ProxyAPI с таймаутом через run_in_executor
+                    loop = asyncio.get_event_loop()
+                    response = await with_timeout(
+                        loop.run_in_executor(
+                            None,
+                            lambda: self.client.chat.completions.create(
+                                model=config.ai.model,
+                                messages=[
+                                    {"role": "system", "content": "Ты - профессиональный SMM-менеджер, создающий качественный контент для дайджестов новостей об ИИ."},
+                                    {"role": "user", "content": prompt}
+                                ]
+                            )
+                        ),
+                        timeout_seconds=AI_REQUEST_TIMEOUT,
+                        operation_name="генерация текста",
+                        fallback_value=None
                     )
                     
                     result = response.choices[0].message.content.strip()
@@ -244,6 +258,8 @@ class AIAnalysisService:
             "message": "ProxyAPI работает как полноценный AI сервис" if self.use_proxy else "ProxyAPI не настроен - добавьте PROXY_API_URL и PROXY_API_KEY в .env"
         }
 
+    @ai_retry
+    @ai_circuit_breaker
     async def analyze_news_relevance(self, title: str, content: str) -> Optional[int]:
         """
         Анализирует релевантность новости для ИИ-дайджеста..
@@ -304,9 +320,19 @@ class AIAnalysisService:
                 for model in models_to_try:
                     try:
                         logger.info(f"🤖 Пробуем модель {model} для анализа релевантности")
-                        response = self.client.chat.completions.create(
-                            model=model,
-                            messages=[{"role": "user", "content": relevance_prompt}]
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        response = await with_timeout(
+                            loop.run_in_executor(
+                                None,
+                                lambda: self.client.chat.completions.create(
+                                    model=model,
+                                    messages=[{"role": "user", "content": relevance_prompt}]
+                                )
+                            ),
+                            timeout_seconds=AI_REQUEST_TIMEOUT,
+                            operation_name=f"анализ релевантности ({model})",
+                            fallback_value=None
                         )
                         logger.info(f"✅ Успешно использована модель: {model}")
                         break

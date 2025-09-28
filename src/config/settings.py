@@ -152,6 +152,42 @@ class ExpertConfig:
 
 
 @dataclass
+class DuplicateDetectionConfig:
+    """Конфигурация поиска дубликатов новостей."""
+    # Временной фильтр
+    time_window_hours: int = 24  # Окно поиска дубликатов в часах
+    
+    # Алгоритм Майерса + Левенштейн
+    myers_threshold: float = 0.15  # Порог схожести (15% от длины текста)
+    min_text_length: int = 50  # Минимальная длина текста для сравнения
+    
+    # RuBERT эмбеддинги
+    rubert_model: str = "cointegrated/rubert-tiny2"  # Модель для эмбеддингов
+    embedding_dimension: int = 312  # Размерность эмбеддингов rubert-tiny2
+    cosine_threshold: float = 0.8  # Порог косинусного сходства
+    
+    # DBSCAN кластеризация
+    dbscan_eps: float = 0.3  # Радиус соседства для DBSCAN
+    dbscan_min_samples: int = 2  # Минимум образцов в кластере
+    
+    # Производительность
+    max_news_to_compare: int = 50  # Максимум новостей для сравнения
+    cache_embeddings: bool = True  # Кэшировать эмбеддинги
+    cache_ttl_hours: int = 24  # TTL кэша эмбеддингов в часах
+    
+    def __post_init__(self):
+        """Валидация конфигурации поиска дубликатов."""
+        if not (0 < self.myers_threshold < 1):
+            raise ValueError("myers_threshold должен быть от 0 до 1")
+        if not (0 < self.cosine_threshold < 1):
+            raise ValueError("cosine_threshold должен быть от 0 до 1")
+        if self.time_window_hours <= 0:
+            raise ValueError("time_window_hours должен быть больше 0")
+        if self.min_text_length <= 0:
+            raise ValueError("min_text_length должен быть больше 0")
+
+
+@dataclass
 class AppConfig:
     """Главная конфигурация приложения."""
     database: DatabaseConfig
@@ -162,6 +198,7 @@ class AppConfig:
     message: MessageConfig
     scheduler: SchedulerConfig
     expert: ExpertConfig
+    duplicate_detection: DuplicateDetectionConfig
     
     @classmethod
     def load(cls) -> 'AppConfig':
@@ -224,6 +261,19 @@ class AppConfig:
                     test_expert_telegram_id=os.getenv('TEST_EXPERT_TELEGRAM_ID', '1326944316'),
                     test_expert_name=os.getenv('TEST_EXPERT_NAME', 'Я (тестовый эксперт)'),
                     test_expert_specialization=os.getenv('TEST_EXPERT_SPECIALIZATION', 'Тестирование')
+                ),
+                duplicate_detection=DuplicateDetectionConfig(
+                    time_window_hours=int(os.getenv('DUPLICATE_TIME_WINDOW_HOURS', '24')),
+                    myers_threshold=float(os.getenv('DUPLICATE_MYERS_THRESHOLD', '0.15')),
+                    min_text_length=int(os.getenv('DUPLICATE_MIN_TEXT_LENGTH', '50')),
+                    rubert_model=os.getenv('DUPLICATE_RUBERT_MODEL', 'cointegrated/rubert-tiny2'),
+                    embedding_dimension=int(os.getenv('DUPLICATE_EMBEDDING_DIMENSION', '312')),
+                    cosine_threshold=float(os.getenv('DUPLICATE_COSINE_THRESHOLD', '0.8')),
+                    dbscan_eps=float(os.getenv('DUPLICATE_DBSCAN_EPS', '0.3')),
+                    dbscan_min_samples=int(os.getenv('DUPLICATE_DBSCAN_MIN_SAMPLES', '2')),
+                    max_news_to_compare=int(os.getenv('DUPLICATE_MAX_NEWS_TO_COMPARE', '50')),
+                    cache_embeddings=os.getenv('DUPLICATE_CACHE_EMBEDDINGS', 'true').lower() == 'true',
+                    cache_ttl_hours=int(os.getenv('DUPLICATE_CACHE_TTL_HOURS', '24'))
                 )
             )
         except Exception as e:
@@ -242,6 +292,7 @@ class AppConfig:
             self.message.__post_init__()
             self.scheduler.__post_init__()
             self.expert.__post_init__()
+            self.duplicate_detection.__post_init__()
             
             logger.info("✅ Конфигурация успешно валидирована")
             return True
