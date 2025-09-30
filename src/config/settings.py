@@ -10,6 +10,10 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, List
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +100,9 @@ class TimeoutConfig:
     reminder_interval: int = 3600  # 1 час между напоминаниями
     curator_alert_threshold: int = 14400  # 4 часа до уведомления куратора
     news_parsing_interval: int = 1  # 1 час между парсингом новостей
+    message_delay_seconds: float = 0.5  # Задержка между сообщениями
+    bot_loop_sleep_seconds: int = 1  # Задержка в основном цикле бота
+    session_restore_timeout: float = 30.0  # Таймаут восстановления сессий
     
     def __post_init__(self):
         """Валидация конфигурации таймаутов."""
@@ -112,6 +119,7 @@ class MessageConfig:
     max_news_list_length: int = 3500
     max_expert_message_length: int = 3500
     split_message_length: int = 1024
+    max_digest_parts: int = 3
     
     def __post_init__(self):
         """Валидация конфигурации сообщений."""
@@ -240,13 +248,17 @@ class AppConfig:
                     approval_timeout=int(os.getenv('APPROVAL_TIMEOUT', '3600')),
                     reminder_interval=int(os.getenv('REMINDER_INTERVAL', '3600')),
                     curator_alert_threshold=int(os.getenv('CURATOR_ALERT_THRESHOLD', '14400')),
-                    news_parsing_interval=int(os.getenv('NEWS_PARSING_INTERVAL', '1'))
+                    news_parsing_interval=int(os.getenv('NEWS_PARSING_INTERVAL', '1')),
+                    message_delay_seconds=float(os.getenv('MESSAGE_DELAY_SECONDS', '0.5')),
+                    bot_loop_sleep_seconds=int(os.getenv('BOT_LOOP_SLEEP_SECONDS', '1')),
+                    session_restore_timeout=float(os.getenv('SESSION_RESTORE_TIMEOUT', '30.0'))
                 ),
                 message=MessageConfig(
                     max_digest_length=int(os.getenv('MAX_DIGEST_LENGTH', '4096')),
                     max_news_list_length=int(os.getenv('MAX_NEWS_LIST_LENGTH', '3500')),
                     max_expert_message_length=int(os.getenv('MAX_EXPERT_MESSAGE_LENGTH', '3500')),
-                    split_message_length=int(os.getenv('SPLIT_MESSAGE_LENGTH', '1024'))
+                    split_message_length=int(os.getenv('SPLIT_MESSAGE_LENGTH', '1024')),
+                    max_digest_parts=int(os.getenv('MAX_DIGEST_PARTS', '3'))
                 ),
                 scheduler=SchedulerConfig(
                     morning_digest_hour=int(os.getenv('MORNING_DIGEST_HOUR', '9')),

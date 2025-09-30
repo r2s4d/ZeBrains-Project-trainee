@@ -32,6 +32,7 @@ from src.config import config
 from src.services.bot_session_service import bot_session_service
 from src.services.ai_analysis_service import AIAnalysisService
 from src.services.scheduler_service import SchedulerService
+from src.utils.bot_utils import BotUtils
 
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
@@ -73,54 +74,65 @@ class AINewsBot:
         self.application = Application.builder().token(token).build()
         self.service = get_database_service()
         
-
-        
         # ✅ Используем BotSessionService для управления состояниями
         self.session_service = bot_session_service
         
-        # OpenAI сервис больше не нужен, используем AIAnalysisService
-        logger.info("ℹ️ OpenAI сервис отключен, используем AIAnalysisService с ProxyAPI")
+        # Инициализируем все сервисы
+        self._init_services()
         
+        # Настройка обработчиков
+        self._setup_handlers()
+    
+    def _init_services(self):
+        """Инициализация всех сервисов бота."""
+        logger.info("🔧 Начинаем инициализацию сервисов...")
         
-        # Инициализируем NewsParserService для автоматического парсинга новостей
-        # Используем единственный экземпляр БД сервиса
-        postgres_db = self.service
+        # Инициализируем AI сервис
+        self._init_ai_services()
         
-        # Создаем AI сервис для анализа новостей
+        # Инициализируем основные сервисы
+        self._init_core_services()
+        
+        # Инициализируем сервисы планировщика
+        self._init_scheduler_services()
+        
+        # Инициализируем сервисы модерации
+        self._init_moderation_services()
+        
+        logger.info("✅ Все сервисы инициализированы")
+    
+    def _init_ai_services(self):
+        """Инициализация AI сервисов."""
         try:
             self.ai_analysis_service = AIAnalysisService()
             logger.info("✅ AIAnalysisService подключен для анализа новостей")
         except Exception as e:
             logger.error(f"❌ Ошибка создания AIAnalysisService: {e}")
-            # Создаем заглушку
             self.ai_analysis_service = None
-        
+    
+    def _init_core_services(self):
+        """Инициализация основных сервисов."""
+        # NewsParserService
         self.parser_service = NewsParserService(
-            database_service=postgres_db,
+            database_service=self.service,
             ai_analysis_service=self.ai_analysis_service
         )
         logger.info("✅ NewsParserService подключен для автоматического парсинга с PostgreSQL")
-
-        # Инициализируем SchedulerService для автоматических задач
+        
+        # MorningDigestService
+        self.morning_digest_service = MorningDigestService(
+            database_service=self.service,
+            ai_analysis_service=self.ai_analysis_service,
+            bot=self.application.bot
+        )
+        logger.info("✅ MorningDigestService создан")
+    
+    def _init_scheduler_services(self):
+        """Инициализация сервисов планировщика."""
         try:
             logger.info("🔧 Начинаем инициализацию SchedulerService...")
             
-            logger.info("✅ Модули SchedulerService импортированы")
-            
-            # Проверяем доступность parser_service
-            if self.parser_service:
-                logger.info("✅ NewsParserService доступен для SchedulerService")
-            else:
-                logger.warning("⚠️ NewsParserService недоступен для SchedulerService")
-            
-            self.morning_digest_service = MorningDigestService(
-                database_service=postgres_db,
-                ai_analysis_service=self.ai_analysis_service,
-                bot=self.application.bot
-            )
-            logger.info("✅ MorningDigestService создан")
-            
-            # Инициализируем новые сервисы для финального форматирования
+            # Инициализируем сервисы для финального форматирования
             if self.ai_analysis_service:
                 self.final_digest_formatter = FinalDigestFormatterService(self.ai_analysis_service)
                 logger.info("✅ FinalDigestFormatterService создан")
@@ -150,9 +162,7 @@ class AINewsBot:
                 self.curator_approval_service = None
                 self.expert_interaction_service = None
             
-            
-            # Передаем NewsParserService для автоматического парсинга
-            logger.info("🔧 Создаем SchedulerService...")
+            # SchedulerService
             self.scheduler_service = SchedulerService(
                 morning_digest_service=self.morning_digest_service,
                 news_parser_service=self.parser_service
@@ -160,15 +170,15 @@ class AINewsBot:
             logger.info("✅ SchedulerService подключен для автоматических задач")
             logger.info("📱 Автоматический парсинг новостей включен")
             
-            # Планировщик будет запущен в методе run()
         except Exception as e:
             logger.error(f"❌ Ошибка создания SchedulerService: {e}")
             logger.error(f"❌ Тип ошибки: {type(e).__name__}")
             import traceback
             logger.error(f"❌ Полный traceback: {traceback.format_exc()}")
             self.scheduler_service = None
-        
-        # Инициализируем новые сервисы для интерактивной модерации
+    
+    def _init_moderation_services(self):
+        """Инициализация сервисов модерации."""
         try:
             self.interactive_moderation_service = InteractiveModerationService()
             self.expert_choice_service = ExpertChoiceService()
@@ -177,9 +187,6 @@ class AINewsBot:
             logger.error(f"❌ Ошибка создания сервисов модерации: {e}")
             self.interactive_moderation_service = None
             self.expert_choice_service = None
-        
-        # Настройка обработчиков
-        self._setup_handlers()
     
     def _setup_handlers(self):
         """Настройка обработчиков команд и сообщений."""
@@ -274,11 +281,7 @@ class AINewsBot:
         query = update.callback_query
         
         # Безопасно отвечаем на callback query с обработкой ошибок
-        try:
-            await query.answer()
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка при ответе на callback query: {e}")
-            # Продолжаем выполнение даже если не удалось ответить
+        await BotUtils.safe_answer_callback(query)
         
         data = query.data
         logger.info(f"🔘 Обработка callback: {data}")
@@ -346,12 +349,9 @@ class AINewsBot:
             # Убираем лишнее сообщение - дайджест создается автоматически
             
             # Создаем MorningDigestService
-            # Получаем необходимые сервисы
-            postgres_db = self._get_postgres_db()
-            
-            # Создаем сервис дайджеста
+            # Используем уже созданный единственный экземпляр БД сервиса
             digest_service = MorningDigestService(
-                database_service=postgres_db,
+                database_service=self.service,
                 ai_analysis_service=self.ai_analysis_service,
                 bot=self.application.bot
             )
@@ -400,47 +400,6 @@ class AINewsBot:
                 "Попробуйте позже или обратитесь к администратору."
             )
     
-    async def handle_moderation_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка callback кнопок модерации."""
-        query = update.callback_query
-        user = update.effective_user
-        
-        # Безопасно отвечаем на callback query с обработкой ошибок
-        try:
-            await query.answer()
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка при ответе на callback query: {e}")
-            # Продолжаем выполнение даже если не удалось ответить
-        
-        try:
-            # Проверяем права куратора
-            if not await self._is_curator(user.id):
-                await query.answer("❌ У вас нет прав для модерации!")
-                return
-            
-            callback_data = query.data
-            
-            if callback_data.startswith("remove_news_"):
-                # Удаление новости
-                news_id = int(callback_data.split("_")[-1])
-                await self._handle_remove_news(query, user.id, news_id)
-                
-            elif callback_data == "approve_remaining":
-                # Одобрение оставшихся новостей
-                await self._handle_approve_remaining(query, user.id)
-                
-            elif callback_data.startswith("select_expert_"):
-                # Выбор эксперта
-                expert_id = int(callback_data.split("_")[-1])
-                await self._handle_select_expert(query, user.id, expert_id)
-                
-                
-            else:
-                await query.answer("❌ Неизвестная команда")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка в handle_moderation_callback: {e}")
-            await query.answer("❌ Произошла ошибка")
     
     async def _handle_remove_news(self, query, user_id: int, news_id: int):
         """Обработка удаления новости."""
@@ -448,9 +407,11 @@ class AINewsBot:
             logger.info(f"🗑️ Удаляем новость {news_id} для пользователя {user_id}")
             
             # Проверяем доступность сервиса модерации
-            if not hasattr(self, 'interactive_moderation_service') or not self.interactive_moderation_service:
-                logger.error("❌ InteractiveModerationService недоступен")
-                await query.answer("❌ Сервис модерации недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.interactive_moderation_service, 
+                "InteractiveModerationService", 
+                query
+            ):
                 return
             
             # Удаляем новость из сессии модерации
@@ -546,7 +507,7 @@ class AINewsBot:
             cleaned_text = self.morning_digest_service._clean_html_text(message_text)
             
             # Проверяем длину сообщения и разбиваем на части если нужно
-            max_length = 4096  # Лимит Telegram
+            max_length = config.telegram.max_message_length
             
             if len(cleaned_text) <= max_length:
                 # Сообщение помещается в один пост
@@ -597,9 +558,9 @@ class AINewsBot:
                     
                     # Проверяем длину части перед отправкой
                     part_text = part['text']
-                    if len(part_text) > 4096:
+                    if len(part_text) > config.telegram.max_message_length:
                         logger.warning(f"⚠️ Часть всё ещё слишком длинная: {len(part_text)} символов, обрезаем")
-                        part_text = part_text[:4090] + "\n..."
+                        part_text = part_text[:config.telegram.max_message_length - 6] + "\n..."
                     
                     # Отправляем часть с кнопками
                     if part_buttons:
@@ -636,9 +597,11 @@ class AINewsBot:
         try:
             logger.info(f"👨‍💼 Обрабатываем выбор эксперта {expert_id} для пользователя {user_id}")
             
-            if not hasattr(self, 'expert_choice_service') or not self.expert_choice_service:
-                logger.error("❌ ExpertChoiceService недоступен")
-                await query.answer("❌ Сервис выбора эксперта недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.expert_choice_service, 
+                "ExpertChoiceService", 
+                query
+            ):
                 return
             
             expert = self.expert_choice_service.get_expert_by_id(expert_id)
@@ -669,14 +632,18 @@ class AINewsBot:
             logger.info(f"📤 Начинаем отправку новостей эксперту {expert.name} (ID: {expert.id})")
             
             # Проверяем доступность сервисов
-            if not hasattr(self, 'interactive_moderation_service') or not self.interactive_moderation_service:
-                logger.error("❌ InteractiveModerationService недоступен")
-                await query.answer("❌ Сервис модерации недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.interactive_moderation_service, 
+                "InteractiveModerationService", 
+                query
+            ):
                 return
             
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
-                logger.error("❌ ExpertInteractionService недоступен")
-                await query.answer("❌ Сервис взаимодействия с экспертами недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.expert_interaction_service, 
+                "ExpertInteractionService", 
+                query
+            ):
                 return
             
             # Получаем одобренные новости из сессии
@@ -738,8 +705,11 @@ class AINewsBot:
     async def _handle_comment_request(self, query, expert_id: int, news_id: int):
         """Обрабатывает запрос эксперта на комментирование новости."""
         try:
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
-                await query.answer("❌ Сервис взаимодействия с экспертами недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.expert_interaction_service, 
+                "ExpertInteractionService", 
+                query
+            ):
                 return
             
             # Получаем инструкции для комментирования
@@ -771,7 +741,7 @@ class AINewsBot:
             digest = session['digest_data']
             
             # Создаем полный дайджест в сбалансированных частях
-            parts = self.morning_digest_service._create_balanced_parts(digest, max_parts=3)
+            parts = self.morning_digest_service._create_balanced_parts(digest, max_parts=config.message.max_digest_parts)
             
             for i, part in enumerate(parts, 1):
                 await query.message.reply_text(
@@ -840,7 +810,7 @@ class AINewsBot:
     async def _handle_expert_comment(self, update: Update, expert_id: int, comment_text: str):
         """Обрабатывает комментарий эксперта."""
         try:
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
+            if not self.expert_interaction_service:
                 await update.message.reply_text("❌ Сервис взаимодействия с экспертами недоступен")
                 return
             
@@ -890,7 +860,7 @@ class AINewsBot:
     async def _show_updated_expert_news_list(self, expert_id: int):
         """Показывает обновленный список новостей для эксперта."""
         try:
-            if not hasattr(self, 'expert_interaction_service') or not self.expert_interaction_service:
+            if not self.expert_interaction_service:
                 return
             
             # Получаем сессию эксперта из БД
@@ -935,7 +905,7 @@ class AINewsBot:
                 
                 # Небольшая задержка между сообщениями
                 if i < len(news_parts) - 1:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(config.timeout.message_delay_seconds)
             
             logger.info(f"✅ Обновленный список новостей отправлен эксперту {expert_id}: {len(remaining_news)} новостей")
             
@@ -944,13 +914,6 @@ class AINewsBot:
     
     # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
     
-    def _get_postgres_db(self):
-        """Получает PostgreSQL сервис (единственный экземпляр)."""
-        try:
-            return self.service  # Используем уже созданный единственный экземпляр
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения PostgreSQL сервиса: {e}")
-            return None
     
     
     
@@ -1000,7 +963,7 @@ class AINewsBot:
             
             response = f"✅ Планировщик запущен!\n\n"
             response += f"📅 Следующий дайджест: {next_run_str}\n"
-            response += f"🕐 Время отправки: 9:00 утра\n"
+            response += f"🕐 Время отправки: {config.scheduler.morning_digest_hour}:00 утра\n"
             response += f"💬 Чат кураторов: ID {scheduler_service.morning_digest_service.curators_chat_id}\n\n"
             response += f"📋 Доступные команды:\n"
             response += f"`schedule_status` - Статус планировщика\n"
@@ -1145,7 +1108,7 @@ class AINewsBot:
             
             # Держим бота запущенным
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(config.timeout.bot_loop_sleep_seconds)
             
         except Exception as e:
             logger.error(f"❌ Ошибка при запуске бота: {e}")
@@ -1171,9 +1134,11 @@ class AINewsBot:
         try:
             logger.info(f"✅ Одобряем оставшиеся новости для пользователя {user_id}")
             
-            if not hasattr(self, 'interactive_moderation_service') or not self.interactive_moderation_service:
-                logger.error("❌ InteractiveModerationService недоступен")
-                await query.answer("❌ Сервис модерации недоступен")
+            if not await BotUtils.check_service_availability_simple(
+                self.interactive_moderation_service, 
+                "InteractiveModerationService", 
+                query
+            ):
                 return
             
             # УДАЛЯЕМ ВСЕ ЧАСТИ ДАЙДЖЕСТА ПЕРЕД ОДОБРЕНИЕМ
@@ -1364,7 +1329,7 @@ class AINewsBot:
                 session_type='digest_edit',
                 user_id=str(user_id),
                 data={'waiting': True, 'user_id': user_id},
-                expires_at=datetime.now() + timedelta(hours=1)
+                expires_at=datetime.now() + timedelta(seconds=config.timeout.approval_timeout)
             )
             logger.info(f"🔄 Установлено состояние ожидания правок в БД для пользователя {user_id}")
             
@@ -1662,7 +1627,7 @@ class AINewsBot:
                     from src.utils.timeout_utils import with_timeout
                     results = await with_timeout(
                         asyncio.gather(*tasks, return_exceptions=True),
-                        timeout_seconds=30.0,  # 30 секунд на все сессии
+                        timeout_seconds=config.timeout.session_restore_timeout,  # Таймаут восстановления сессий
                         operation_name="восстановление сессий",
                         fallback_value=[]
                     )
