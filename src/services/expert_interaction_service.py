@@ -14,6 +14,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from src.config import config
 from src.services.bot_session_service import bot_session_service
+from src.utils.message_splitter import MessageSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -367,51 +368,29 @@ class ExpertInteractionService:
         if not news_items:
             return []
         
-        if max_length is None:
-            max_length = config.message.max_news_list_length
+        # Заголовок списка новостей
+        header = "📰 <b>Новости для комментирования:</b>\n\n"
         
-        parts = []
-        current_part = "📰 <b>Новости для комментирования:</b>\n\n"
-        current_news = []
-        current_buttons = []
-        
-        for i, news in enumerate(news_items):
+        # Функция форматирования новости для эксперта
+        def format_news(i: int, news: Dict) -> str:
             title = self._clean_html_text(news.get('title', 'Без заголовка'))
             summary = self._clean_html_text(news.get('summary', 'Без описания'))
             source = self._clean_html_text(news.get('source_links', 'Не указан'))
             
-            news_text = f"""
+            return f"""
 {i+1}. {summary}
 ➡️ Источник: {source}
 
 """
-            
-            # Проверяем, не превысит ли добавление новости лимит
-            if len(current_part + news_text) > max_length and current_part != "📰 <b>Новости для комментирования:</b>\n\n":
-                # Сохраняем текущую часть
-                parts.append({
-                    'text': current_part,
-                    'news_indices': current_news,
-                    'buttons': current_buttons
-                })
-                
-                # Начинаем новую часть
-                current_part = "📰 <b>Новости для комментирования:</b>\n\n" + news_text
-                current_news = [i]
-                current_buttons = [i]
-            else:
-                # Добавляем новость к текущей части
-                current_part += news_text
-                current_news.append(i)
-                current_buttons.append(i)
         
-        # Добавляем последнюю часть
-        if current_part and current_part != "📰 <b>Новости для комментирования:</b>\n\n":
-            parts.append({
-                'text': current_part,
-                'news_indices': current_news,
-                'buttons': current_buttons
-            })
+        # Используем универсальную утилиту для разбиения
+        parts = MessageSplitter.split_by_items(
+            items=news_items,
+            header=header,
+            item_formatter=format_news,
+            max_length=max_length,
+            include_metadata=True
+        )
         
         return parts
     

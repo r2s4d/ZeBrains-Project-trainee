@@ -14,6 +14,7 @@ import asyncio
 from telegram import InlineKeyboardButton
 from src.config import config
 from src.models import DigestSession, engine
+from src.utils.message_splitter import MessageSplitter
 from sqlalchemy.orm import Session as DBSession
 
 logger = logging.getLogger(__name__)
@@ -828,14 +829,6 @@ class MorningDigestService:
         if not digest.news_items:
             return []
         
-        if max_length is None:
-            max_length = config.message.max_news_list_length
-        
-        parts = []
-        current_part = ""
-        current_news = []
-        current_buttons = []
-        
         # Заголовок дайджеста
         header = f"""
 🌅 УТРЕННИЙ ДАЙДЖЕСТ НОВОСТЕЙ
@@ -844,89 +837,23 @@ class MorningDigestService:
 
 📋 НОВОСТИ ДЛЯ МОДЕРАЦИИ:
 """
-        # header = self._escape_markdown(header)  # Отключаем экранирование
         
-        current_part = header
-        
-        for i, news in enumerate(digest.news_items):
-            # Формируем текст новости
-            news_text = f"""
+        # Функция форматирования новости
+        def format_news(i: int, news: DigestNews) -> str:
+            return f"""
 {i+1}. {news.summary}
 ➡️ Источник: {news.source_links if news.source_links else 'Не указан'}
 
 """
-            # news_text = self._escape_markdown(news_text)  # Отключаем экранирование
-            
-            # Проверяем, не превысит ли добавление новости лимит
-            if len(current_part + news_text) > max_length and current_part != header:
-                # Сохраняем текущую часть
-                parts.append({
-                    'text': current_part,
-                    'news_indices': current_news,
-                    'buttons': current_buttons
-                })
-                
-                # Начинаем новую часть
-                current_part = news_text
-                current_news = [i]
-                current_buttons = [i]
-            else:
-                # Добавляем новость к текущей части
-                current_part += news_text
-                current_news.append(i)
-                current_buttons.append(i)
         
-        # Добавляем последнюю часть
-        if current_part:
-            # Проверяем, не слишком ли длинная последняя часть
-            if len(current_part) > max_length:
-                # Разбиваем на более мелкие части
-                logger.warning(f"⚠️ Последняя часть слишком длинная ({len(current_part)} символов), разбиваем...")
-                # Убираем заголовок из последней части для разбиения
-                content_only = current_part.replace(header, "")
-                # Разбиваем по новостям
-                news_parts = content_only.split('\n\n')
-                current_part = header
-                current_news = []
-                current_buttons = []
-                
-                for news_part in news_parts:
-                    if news_part.strip():
-                        if len(current_part + news_part + '\n\n') > max_length:
-                            # Сохраняем текущую часть
-                            parts.append({
-                                'text': current_part,
-                                'news_indices': current_news,
-                                'buttons': current_buttons
-                            })
-                            # Начинаем новую часть
-                            current_part = header + news_part + '\n\n'
-                            current_news = []
-                            current_buttons = []
-                        else:
-                            current_part += news_part + '\n\n'
-                            # Находим индекс новости по номеру
-                            try:
-                                news_num = int(news_part.split('.')[0])
-                                if news_num > 0:
-                                    current_news.append(news_num - 1)
-                                    current_buttons.append(news_num - 1)
-                            except:
-                                pass
-                
-                # Добавляем последнюю часть
-                if current_part and current_part != header:
-                    parts.append({
-                        'text': current_part,
-                        'news_indices': current_news,
-                        'buttons': current_buttons
-                    })
-            else:
-                parts.append({
-                    'text': current_part,
-                    'news_indices': current_news,
-                    'buttons': current_buttons
-                })
+        # Используем универсальную утилиту для разбиения
+        parts = MessageSplitter.split_by_items(
+            items=digest.news_items,
+            header=header,
+            item_formatter=format_news,
+            max_length=max_length,
+            include_metadata=True
+        )
         
         # Добавляем инструкции к последней части
         if parts:
@@ -935,7 +862,6 @@ class MorningDigestService:
 • Нажмите кнопку "🗑️ Удалить" для каждой ненужной новости
 • После удаления ненужных новостей нажмите "✅ Одобрить оставшиеся"
 """
-            # footer = self._escape_markdown(footer)  # Отключаем экранирование
             parts[-1]['text'] += footer
         
         return parts

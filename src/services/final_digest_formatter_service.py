@@ -20,6 +20,7 @@ from datetime import datetime
 from src.models.database import News, Comment, Expert
 from src.config import config
 from src.services.ai_analysis_service import AIAnalysisService
+from src.utils.message_splitter import MessageSplitter
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -595,50 +596,10 @@ class FinalDigestFormatterService:
         Returns:
             Список частей дайджеста
         """
-        if max_length is None:
-            max_length = config.message.max_digest_length
-        
-        if len(digest) <= max_length:
-            return [digest]
-        
-        # Разделяем по логическим блокам
-        parts = []
-        current_part = ""
-        
-        # Разделяем по двойным переносам строк (блоки)
-        blocks = digest.split('\n\n')
-        
-        for block in blocks:
-            # Если блок помещается в текущую часть
-            if len(current_part + block + '\n\n') <= max_length:
-                current_part += block + '\n\n'
-            else:
-                # Сохраняем текущую часть
-                if current_part:
-                    parts.append(current_part.strip())
-                
-                # Если блок слишком длинный, разбиваем его
-                if len(block) > max_length:
-                    # Разбиваем длинный блок по предложениям
-                    sentences = block.split('. ')
-                    temp_block = ""
-                    
-                    for sentence in sentences:
-                        if len(temp_block + sentence + '. ') <= max_length:
-                            temp_block += sentence + '. '
-                        else:
-                            if temp_block:
-                                parts.append(temp_block.strip())
-                            temp_block = sentence + '. '
-                    
-                    if temp_block:
-                        current_part = temp_block
-                else:
-                    current_part = block + '\n\n'
-        
-        # Добавляем последнюю часть
-        if current_part:
-            parts.append(current_part.strip())
-        
-        logger.info(f"📝 Дайджест разделен на {len(parts)} частей")
-        return parts
+        # Используем универсальную утилиту для разбиения по блокам
+        return MessageSplitter.split_by_blocks(
+            text=digest,
+            max_length=max_length,
+            block_separator='\n\n',
+            sentence_separator='. '
+        )
