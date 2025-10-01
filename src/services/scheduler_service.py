@@ -197,10 +197,30 @@ class SchedulerService:
             # Очищаем старые завершенные сессии (старше 7 дней)
             old_count = await bot_session_service.cleanup_old_completed_sessions(days_old=7)
             
-            # Очищаем файловые сессии дайджестов
-            if hasattr(self, 'morning_digest_service') and self.morning_digest_service:
-                # Метод _cleanup_old_sessions не существует, пропускаем
-                logger.info("🧹 Очистка файловых сессий дайджестов пропущена (метод не реализован)")
+            # Очищаем старые неактивные сессии дайджестов из PostgreSQL
+            from sqlalchemy.orm import Session as DBSession
+            from src.models import DigestSession, engine
+            from datetime import datetime, timedelta
+            
+            try:
+                cutoff_date = datetime.now() - timedelta(days=7)
+                
+                with DBSession(bind=engine) as session:
+                    # Удаляем старые неактивные сессии дайджеста
+                    deleted_digest = session.query(DigestSession).filter(
+                        DigestSession.is_active == False,
+                        DigestSession.updated_at < cutoff_date
+                    ).delete()
+                    
+                    session.commit()
+                    
+                    if deleted_digest > 0:
+                        logger.info(f"🗑️ Удалено {deleted_digest} старых сессий дайджеста")
+                    else:
+                        logger.info("✅ Нет старых сессий дайджеста для удаления")
+                        
+            except Exception as e:
+                logger.error(f"❌ Ошибка очистки сессий дайджеста: {e}")
             
             total_deleted = expired_count + old_count
             if total_deleted > 0:

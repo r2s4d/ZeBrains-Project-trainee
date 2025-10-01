@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import asyncio
 from telegram import InlineKeyboardButton
 from src.config import config
+from src.models import DigestSession, engine
+from sqlalchemy.orm import Session as DBSession
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,122 @@ class MorningDigestService:
         
         # Система отслеживания ID сообщений дайджеста в базе данных
         # self.digest_sessions = {}  # Убираем словарь в памяти
+        self.db_engine = engine  # Для работы с DigestSession
         
         logger.info(f"✅ MorningDigestService инициализирован (чат кураторов: {curators_chat_id})")
+    
+    # ============================================================================
+    # НОВЫЕ МЕТОДЫ РАБОТЫ С БД (PostgreSQL DigestSession)
+    # ============================================================================
+    
+    def _save_digest_session(self, chat_id: str, message_ids: List[int], news_count: int):
+        """
+        Сохраняет информацию о сессии дайджеста в PostgreSQL.
+        
+        Args:
+            chat_id: ID чата
+            message_ids: Список ID сообщений дайджеста
+            news_count: Количество новостей в дайджесте
+        """
+        try:
+            logger.info(f"💾 [БД] Сохраняем сессию дайджеста для чата: {chat_id} (тип: {type(chat_id)})")
+            logger.info(f"💾 [БД] ID сообщений: {message_ids}")
+            
+            with DBSession(bind=self.db_engine) as session:
+                # Проверяем, есть ли активная сессия для этого чата
+                existing_session = session.query(DigestSession).filter(
+                    DigestSession.chat_id == str(chat_id),
+                    DigestSession.is_active == True
+                ).first()
+                
+                if existing_session:
+                    # Обновляем существующую сессию
+                    existing_session.message_ids = json.dumps(message_ids)
+                    existing_session.news_count = news_count
+                    existing_session.updated_at = datetime.now()
+                    logger.info(f"🔄 [БД] Обновлена существующая сессия ID={existing_session.id}")
+                else:
+                    # Создаем новую сессию
+                    new_session = DigestSession(
+                        chat_id=str(chat_id),
+                        message_ids=json.dumps(message_ids),
+                        news_count=news_count,
+                        is_active=True
+                    )
+                    session.add(new_session)
+                    logger.info(f"➕ [БД] Создана новая сессия")
+                
+                session.commit()
+                logger.info(f"✅ [БД] Сессия сохранена для чата {chat_id}: {len(message_ids)} сообщений, {news_count} новостей")
+                
+        except Exception as e:
+            logger.error(f"❌ [БД] Ошибка сохранения сессии дайджеста: {e}")
+            raise e
+    
+    def get_digest_session(self, chat_id: str) -> Optional[Dict]:
+        """
+        Получает информацию о сессии дайджеста из PostgreSQL.
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            Dict: Информация о сессии или None
+        """
+        try:
+            logger.info(f"🔍 [БД] Ищем сессию дайджеста для чата: {chat_id}")
+            
+            with DBSession(bind=self.db_engine) as session:
+                digest_session = session.query(DigestSession).filter(
+                    DigestSession.chat_id == str(chat_id),
+                    DigestSession.is_active == True
+                ).first()
+                
+                if digest_session:
+                    session_data = {
+                        'chat_id': digest_session.chat_id,
+                        'message_ids': json.loads(digest_session.message_ids),
+                        'news_count': digest_session.news_count,
+                        'created_at': digest_session.created_at,
+                        'is_active': digest_session.is_active
+                    }
+                    logger.info(f"✅ [БД] Сессия найдена: {len(session_data['message_ids'])} сообщений")
+                    return session_data
+                else:
+                    logger.warning(f"⚠️ [БД] Сессия не найдена для чата {chat_id}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"❌ [БД] Ошибка получения сессии дайджеста: {e}")
+            return None
+    
+    def clear_digest_session(self, chat_id: str):
+        """
+        Деактивирует сессию дайджеста для указанного чата в PostgreSQL.
+        
+        Args:
+            chat_id: ID чата
+        """
+        try:
+            logger.info(f"🗑️ [БД] Деактивируем сессию дайджеста для чата: {chat_id}")
+            
+            with DBSession(bind=self.db_engine) as session:
+                digest_session = session.query(DigestSession).filter(
+                    DigestSession.chat_id == str(chat_id),
+                    DigestSession.is_active == True
+                ).first()
+                
+                if digest_session:
+                    digest_session.is_active = False
+                    digest_session.updated_at = datetime.now()
+                    session.commit()
+                    logger.info(f"✅ [БД] Сессия деактивирована для чата {chat_id}")
+                else:
+                    logger.warning(f"⚠️ [БД] Активная сессия не найдена для чата {chat_id}")
+                    
+        except Exception as e:
+            logger.error(f"❌ [БД] Ошибка деактивации сессии дайджеста: {e}")
+    
     
     async def create_morning_digest(self, curator_id: Optional[str] = None) -> MorningDigest:
         """
@@ -999,145 +1115,8 @@ on💡 ИНСТРУКЦИИ:
         logger.info(f"🔘 Всего создано кнопок: {len(buttons)}")
         return message_text, buttons
 
-    def _save_digest_session(self, chat_id: str, message_ids: List[int], news_count: int):
-        """
-        Сохраняет информацию о сессии дайджеста в JSON файл (временное решение).
-        
-        Args:
-            chat_id: ID чата
-            message_ids: Список ID сообщений дайджеста
-            news_count: Количество новостей в дайджесте
-        """
-        try:
-            logger.info(f"💾 Сохраняем сессию дайджеста для чата: {chat_id} (тип: {type(chat_id)})")
-            logger.info(f"💾 ID сообщений: {message_ids}")
-            
-            # Временное решение: сохраняем в JSON файл
-            import os
-            import json
-            
-            # Создаем папку для сессий, если её нет
-            sessions_dir = "digest_sessions"
-            if not os.path.exists(sessions_dir):
-                os.makedirs(sessions_dir)
-            
-            # Файл для сессии
-            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
-            
-            # Данные сессии
-            session_data = {
-                'chat_id': chat_id,
-                'message_ids': message_ids,
-                'news_count': news_count,
-                'created_at': datetime.now().isoformat(),
-                'is_active': True
-            }
-            
-            # Сохраняем в файл
-            with open(session_file, 'w', encoding='utf-8') as f:
-                json.dump(session_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"💾 Сохранена сессия дайджеста для чата {chat_id}: {len(message_ids)} сообщений, {news_count} новостей")
-            
-            # Логируем все активные сессии для отладки
-            active_sessions = []
-            if os.path.exists(sessions_dir):
-                for filename in os.listdir(sessions_dir):
-                    if filename.startswith("session_") and filename.endswith(".json"):
-                        try:
-                            with open(os.path.join(sessions_dir, filename), 'r', encoding='utf-8') as f:
-                                session = json.load(f)
-                                if session.get('is_active', False):
-                                    active_sessions.append(session['chat_id'])
-                        except Exception as e:
-                            logger.warning(f"⚠️ Ошибка чтения файла сессии {filename}: {e}")
-            
-            logger.info(f"💾 Все активные сессии: {active_sessions}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения сессии дайджеста: {e}")
     
-    def get_digest_session(self, chat_id: str) -> Optional[Dict]:
-        """
-        Получает информацию о сессии дайджеста из JSON файла (временное решение).
-        
-        Args:
-            chat_id: ID чата
-            
-        Returns:
-            Dict: Информация о сессии или None
-        """
-        try:
-            # Добавляем логирование для отладки
-            logger.info(f"🔍 Ищем сессию дайджеста для чата: {chat_id}")
-            
-            # Временное решение: читаем из JSON файла
-            import os
-            import json
-            
-            sessions_dir = "digest_sessions"
-            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
-            
-            if os.path.exists(session_file):
-                with open(session_file, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                
-                if session_data.get('is_active', False):
-                    # Конвертируем строку времени обратно в datetime
-                    created_at_str = session_data.get('created_at')
-                    if created_at_str:
-                        try:
-                            created_at = datetime.fromisoformat(created_at_str)
-                            session_data['created_at'] = created_at
-                        except ValueError:
-                            session_data['created_at'] = datetime.now()
-                    
-                    logger.info(f"✅ Сессия найдена: {len(session_data.get('message_ids', []))} сообщений")
-                    return session_data
-                else:
-                    logger.warning(f"⚠️ Сессия для чата {chat_id} неактивна")
-                    return None
-            else:
-                logger.warning(f"⚠️ Файл сессии не найден для чата {chat_id}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения сессии дайджеста: {e}")
-            return None
     
-    def clear_digest_session(self, chat_id: str):
-        """
-        Деактивирует сессию дайджеста для указанного чата в JSON файле (временное решение).
-        
-        Args:
-            chat_id: ID чата
-        """
-        try:
-            import os
-            import json
-            
-            sessions_dir = "digest_sessions"
-            session_file = os.path.join(sessions_dir, f"session_{chat_id}.json")
-            
-            if os.path.exists(session_file):
-                # Читаем текущую сессию
-                with open(session_file, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                
-                # Деактивируем сессию
-                session_data['is_active'] = False
-                session_data['deactivated_at'] = datetime.now().isoformat()
-                
-                # Сохраняем обновленную сессию
-                with open(session_file, 'w', encoding='utf-8') as f:
-                    json.dump(session_data, f, ensure_ascii=False, indent=2)
-                
-                logger.info(f"🗑️ Деактивирована сессия дайджеста для чата {chat_id}")
-            else:
-                logger.warning(f"⚠️ Файл сессии не найден для чата {chat_id}")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка деактивации сессии дайджеста: {e}")
     
     async def delete_digest_messages(self, chat_id: str) -> bool:
         """
@@ -1159,8 +1138,9 @@ on💡 ИНСТРУКЦИИ:
             # ПРОСТОЕ решение: удаляем сообщения из текущей сессии
             total_deleted = await self._delete_all_digest_messages_in_chat(chat_id)
             
-            # НЕ очищаем сессию здесь - это делается в другом месте
-            # self.clear_digest_session(chat_id)  # УБРАНО!
+            # Очищаем сессию после удаления сообщений (теперь работает через БД)
+            self.clear_digest_session(chat_id)
+            logger.info(f"✅ Сессия дайджеста очищена для чата {chat_id}")
             
             logger.info(f"✅ ПРОСТАЯ очистка завершена, удалено {total_deleted} сообщений")
             return total_deleted > 0
