@@ -498,7 +498,6 @@ class ExpertInteractionService:
         message = f"""
 💬 <b>КОММЕНТИРУЕМ НОВОСТЬ:</b>
 
-<b>📰 {selected_news.get('title', 'Без заголовка')}</b>
 📝 {selected_news.get('summary', 'Без описания')}
 ➡️ Источник: {selected_news.get('source_links', 'Не указан')}
 

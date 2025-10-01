@@ -86,6 +86,51 @@ class NewsParserService:
                 logger.error(f"❌ Ошибка инициализации TelegramChannelParser: {e}")
                 self.telegram_parser = None
     
+    async def is_news_already_processed(
+        self, 
+        message_id: Optional[int], 
+        channel_username: str
+    ) -> bool:
+        """
+        Проверяет, не обрабатывалась ли уже эта новость.
+        
+        Эта проверка предотвращает повторную обработку одной и той же новости
+        при последующих парсингах (например, каждый час).
+        
+        Args:
+            message_id: ID сообщения в Telegram
+            channel_username: Username канала (например, '@ai_news')
+            
+        Returns:
+            bool: True если новость уже обработана, False если новая
+        """
+        # Если message_id не указан - считаем, что новость новая
+        if message_id is None:
+            return False
+        
+        try:
+            # Нормализуем channel_username (убираем @)
+            clean_username = channel_username.replace('@', '')
+            
+            # Ищем новость с таким же message_id и каналом в БД
+            with self.db.get_session() as session:
+                existing_news = session.query(News).filter(
+                    News.source_message_id == message_id,
+                    News.source_channel_username == clean_username
+                ).first()
+                
+                if existing_news:
+                    logger.debug(f"⏭️ Новость уже обработана: message_id={message_id}, "
+                               f"channel={clean_username}, news_id={existing_news.id}")
+                    return True
+                
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки уникальности новости: {e}")
+            # При ошибке считаем новость новой (чтобы не потерять данные)
+            return False
+    
     async def start_automatic_parsing(self):
         """
         Запускает автоматический парсинг с учетом времени суток.
@@ -197,7 +242,17 @@ class NewsParserService:
             
             for news_data_item in news_data:
                 try:
-                    # 1. СНАЧАЛА проверяем релевантность новости через AI
+                    # 1. СНАЧАЛА проверяем, не обработана ли уже эта новость
+                    if await self.is_news_already_processed(
+                        news_data_item.get("source_message_id"),
+                        source.telegram_id
+                    ):
+                        logger.info(f"⏭️ Пропускаем уже обработанную новость: "
+                                   f"message_id={news_data_item.get('source_message_id')}, "
+                                   f"channel={source.telegram_id}")
+                        continue
+                    
+                    # 2. Проверяем релевантность новости через AI
                     title = news_data_item["title"]
                     content = news_data_item["content"]
                     
@@ -222,12 +277,12 @@ class NewsParserService:
                             relevance_score = None  # Сбрасываем оценку при ошибке
                             logger.info(f"✅ Новость включена по fallback (ошибка AI): '{title[:50]}...'")
                     
-                    # 2. Если новость нерелевантна - пропускаем её
+                    # 3. Если новость нерелевантна - пропускаем её
                     if not is_relevant:
                         logger.info(f"⏭️ Пропускаем нерелевантную новость: '{title[:50]}...'")
                         continue
                     
-                    # 3. ТОЛЬКО для релевантных новостей проверяем на дубликаты
+                    # 4. ТОЛЬКО для релевантных новостей проверяем на дубликаты
                     duplicate_result = await self.duplicate_detector.detect_duplicates(
                         title, 
                         content,

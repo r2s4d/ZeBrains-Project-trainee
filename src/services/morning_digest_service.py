@@ -852,6 +852,7 @@ class MorningDigestService:
             # Формируем текст новости
             news_text = f"""
 {i+1}. {news.summary}
+➡️ Источник: {news.source_links if news.source_links else 'Не указан'}
 
 """
             # news_text = self._escape_markdown(news_text)  # Отключаем экранирование

@@ -80,7 +80,9 @@ class DuplicateDetectionService:
         self, 
         title: str, 
         content: str, 
-        filter_relevant: bool = True
+        filter_relevant: bool = True,
+        exclude_message_id: Optional[int] = None,
+        exclude_channel: Optional[str] = None
     ) -> DuplicateResult:
         """
         Главный метод поиска дубликатов.
@@ -89,6 +91,8 @@ class DuplicateDetectionService:
             title: Заголовок новости
             content: Содержимое новости
             filter_relevant: Фильтровать только релевантные новости
+            exclude_message_id: ID сообщения для исключения из сравнения
+            exclude_channel: Канал для исключения из сравнения
             
         Returns:
             DuplicateResult: Результат поиска дубликатов
@@ -106,8 +110,12 @@ class DuplicateDetectionService:
                     reason="Текст слишком короткий для сравнения"
                 )
             
-            # 2. Получаем новости для сравнения
-            candidate_news = await self._get_candidate_news(filter_relevant)
+            # 2. Получаем новости для сравнения (исключая указанную новость)
+            candidate_news = await self._get_candidate_news(
+                filter_relevant,
+                exclude_message_id=exclude_message_id,
+                exclude_channel=exclude_channel
+            )
             
             if not candidate_news:
                 logger.info("ℹ️ Нет новостей для сравнения")
@@ -179,12 +187,19 @@ class DuplicateDetectionService:
             logger.error(f"❌ Ошибка предобработки текста: {e}")
             return text
     
-    async def _get_candidate_news(self, filter_relevant: bool = True) -> List[Dict]:
+    async def _get_candidate_news(
+        self, 
+        filter_relevant: bool = True,
+        exclude_message_id: Optional[int] = None,
+        exclude_channel: Optional[str] = None
+    ) -> List[Dict]:
         """
         Получает новости-кандидаты для сравнения.
         
         Args:
             filter_relevant: Фильтровать только релевантные новости
+            exclude_message_id: ID сообщения для исключения из сравнения
+            exclude_channel: Канал для исключения из сравнения
             
         Returns:
             List[Dict]: Список новостей-кандидатов
@@ -207,6 +222,17 @@ class DuplicateDetectionService:
                     # Фильтруем только релевантные новости (оценка >= 6)
                     query = query.filter(News.ai_relevance_score >= 6)
                     logger.debug("🔍 Фильтруем только релевантные новости (ai_relevance_score >= 6)")
+                
+                # Исключаем указанную новость из сравнения
+                if exclude_message_id is not None:
+                    query = query.filter(News.source_message_id != exclude_message_id)
+                    logger.debug(f"🔍 Исключаем message_id={exclude_message_id} из кандидатов")
+                
+                if exclude_channel is not None:
+                    # Нормализуем канал (убираем @)
+                    clean_channel = exclude_channel.replace('@', '')
+                    query = query.filter(News.source_channel_username != clean_channel)
+                    logger.debug(f"🔍 Исключаем канал {clean_channel} из кандидатов")
                 
                 # Ограничиваем количество
                 query = query.limit(self.config.max_news_to_compare)
@@ -511,7 +537,10 @@ class DuplicateDetectionService:
         new_url: Optional[str] = None
     ) -> bool:
         """
-        Объединяет источники дубликата.
+        Объединяет источники дубликата с проверкой существующих связей.
+        
+        Предотвращает создание дублирующих записей в таблице news_sources,
+        которые могут возникнуть при повторной обработке той же новости.
         
         Args:
             existing_news_id: ID существующей новости
@@ -524,21 +553,24 @@ class DuplicateDetectionService:
         try:
             from src.models.database import NewsSource
             
+            logger.debug(f"🔗 Попытка объединить: новость {existing_news_id} + источник {new_source_id}")
+            
             # Проверяем, не существует ли уже такая связь (по новости и источнику)
             with self.db.get_session() as session:
                 from src.models.database import Source
                 
-                # Проверяем по новости и источнику
+                # ПРОВЕРКА 1: Прямая связь news_id + source_id
                 existing_relation = session.query(NewsSource).filter(
                     NewsSource.news_id == existing_news_id,
                     NewsSource.source_id == new_source_id
                 ).first()
                 
                 if existing_relation:
-                    logger.info(f"ℹ️ Связь уже существует: новость {existing_news_id} + источник {new_source_id}")
+                    logger.info(f"⏭️ Связь уже существует: новость {existing_news_id} + источник {new_source_id} "
+                              f"(создана {existing_relation.created_at})")
                     return True
                 
-                # Дополнительная проверка: нет ли уже такого же telegram_id для этой новости
+                # ПРОВЕРКА 2: Источник с таким же telegram_id уже связан с этой новостью
                 new_source = session.query(Source).filter(Source.id == new_source_id).first()
                 if new_source:
                     existing_same_telegram = session.query(NewsSource, Source).join(
@@ -549,7 +581,7 @@ class DuplicateDetectionService:
                     ).first()
                     
                     if existing_same_telegram:
-                        logger.info(f"ℹ️ Источник с telegram_id '{new_source.telegram_id}' уже связан с новостью {existing_news_id}")
+                        logger.info(f"⏭️ Источник с telegram_id '{new_source.telegram_id}' уже связан с новостью {existing_news_id}")
                         return True
                 
                 # Создаем связь между существующей новостью и новым источником
