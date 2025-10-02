@@ -104,12 +104,20 @@ class TimeoutConfig:
     bot_loop_sleep_seconds: int = 1  # Задержка в основном цикле бота
     session_restore_timeout: float = 30.0  # Таймаут восстановления сессий
     
+    # Конфигурация для expert_interaction_service
+    expert_session_ttl_hours: int = 24  # TTL сессии эксперта в часах
+    expert_comment_ttl_hours: int = 2   # TTL комментария эксперта в часах
+    
     def __post_init__(self):
         """Валидация конфигурации таймаутов."""
         if self.approval_timeout <= 0:
             raise ValueError("approval_timeout должен быть больше 0")
         if self.reminder_interval <= 0:
             raise ValueError("reminder_interval должен быть больше 0")
+        if self.expert_session_ttl_hours <= 0:
+            raise ValueError("expert_session_ttl_hours должен быть больше 0")
+        if self.expert_comment_ttl_hours <= 0:
+            raise ValueError("expert_comment_ttl_hours должен быть больше 0")
 
 
 @dataclass
@@ -251,7 +259,9 @@ class AppConfig:
                     news_parsing_interval=int(os.getenv('NEWS_PARSING_INTERVAL', '1')),
                     message_delay_seconds=float(os.getenv('MESSAGE_DELAY_SECONDS', '0.5')),
                     bot_loop_sleep_seconds=int(os.getenv('BOT_LOOP_SLEEP_SECONDS', '1')),
-                    session_restore_timeout=float(os.getenv('SESSION_RESTORE_TIMEOUT', '30.0'))
+                    session_restore_timeout=float(os.getenv('SESSION_RESTORE_TIMEOUT', '30.0')),
+                    expert_session_ttl_hours=int(os.getenv('EXPERT_SESSION_TTL_HOURS', '24')),
+                    expert_comment_ttl_hours=int(os.getenv('EXPERT_COMMENT_TTL_HOURS', '2'))
                 ),
                 message=MessageConfig(
                     max_digest_length=int(os.getenv('MAX_DIGEST_LENGTH', '4096')),

@@ -40,8 +40,16 @@
 1. Зарегистрируйтесь на [ProxyAPI](https://proxyapi.ru)
 2. Получите API ключ
 3. Сохраните URL API (обычно `https://openai.api.proxyapi.ru/v1`)
+4. **Важно**: ProxyAPI используется вместо прямой интеграции с OpenAI для стабильности
 
-### 4. Настройка PostgreSQL
+### 4. Настройка Telegram User API (опционально)
+
+1. Перейдите на [my.telegram.org/apps](https://my.telegram.org/apps)
+2. Создайте новое приложение
+3. Получите `api_id` и `api_hash`
+4. **Назначение**: Публикация длинных сообщений без ограничений Bot API
+
+### 5. Настройка PostgreSQL
 
 1. Установите PostgreSQL 12+
 2. Создайте базу данных:
@@ -97,17 +105,44 @@ DATABASE_URL=postgresql://ai_news_user:secure_password@localhost:5432/ai_news_db
 PROXY_API_URL=https://openai.api.proxyapi.ru/v1
 PROXY_API_KEY=sk-your-proxy-api-key-here
 
+# Telegram User API (опционально)
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+
+# Optional: Advanced Settings
+MORNING_DIGEST_HOUR=9
+NEWS_PARSING_INTERVAL=60
+CACHE_CLEANUP_INTERVAL=3600
+
 # Optional: Logging Level
 LOG_LEVEL=INFO
 ```
 
-### 5. Инициализация базы данных
+### 6. Инициализация базы данных
 
 ```bash
 python -c "from src.models.database import init_db; init_db()"
 ```
 
-### 6. Добавление источников новостей
+### 7. Настройка Telegram User API сессии (опционально)
+
+Если вы хотите использовать User API для публикации длинных сообщений:
+
+```bash
+# Создание сессии (только при первом запуске)
+python -c "
+from src.services.telegram_user_publisher import TelegramUserPublisher
+import asyncio
+
+async def create_session():
+    publisher = TelegramUserPublisher()
+    await publisher.connect()
+
+asyncio.run(create_session())
+"
+```
+
+### 8. Добавление источников новостей
 
 ```bash
 python -c "
@@ -129,7 +164,7 @@ with db.get_session() as session:
 "
 ```
 
-### 7. Добавление экспертов
+### 9. Добавление экспертов
 
 ```bash
 python -c "

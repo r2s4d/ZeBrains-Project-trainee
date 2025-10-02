@@ -60,6 +60,59 @@ class CuratorApprovalService:
         
         logger.info(f"CuratorApprovalService инициализирован для чата {curator_chat_id}")
     
+    async def _send_telegram_message(self, chat_id: str, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> Dict[str, Any]:
+        """
+        Общий метод для отправки сообщений в Telegram.
+        
+        Args:
+            chat_id: ID чата
+            text: Текст сообщения
+            parse_mode: Режим парсинга (HTML)
+            reply_markup: Inline клавиатура (опционально)
+            
+        Returns:
+            Результат отправки
+        """
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            
+            params = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode
+            }
+            
+            if reply_markup:
+                params["reply_markup"] = reply_markup
+            
+            connector = aiohttp.TCPConnector(ssl=True)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(url, json=params) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if result.get("ok"):
+                            return {
+                                "success": True,
+                                "message_id": result["result"]["message_id"]
+                            }
+                        else:
+                            error_msg = result.get("description", "Неизвестная ошибка")
+                            return {
+                                "success": False,
+                                "error": f"Telegram API: {error_msg}"
+                            }
+                    else:
+                        error_text = await response.text()
+                        return {
+                            "success": False,
+                            "error": f"HTTP {response.status}: {error_text}"
+                        }
+        
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     async def _save_current_digest(self, digest_text: str, chat_id: str = None) -> bool:
         """
@@ -200,45 +253,8 @@ class CuratorApprovalService:
         Returns:
             Результат отправки
         """
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            
-            target_chat_id = chat_id or self.curator_chat_id
-            
-            params = {
-                "chat_id": target_chat_id,
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            
-            connector = aiohttp.TCPConnector(ssl=True)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(url, json=params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result.get("ok"):
-                            return {
-                                "success": True,
-                                "message_id": result["result"]["message_id"]
-                            }
-                        else:
-                            error_msg = result.get("description", "Неизвестная ошибка")
-                            return {
-                                "success": False,
-                                "error": f"Telegram API: {error_msg}"
-                            }
-                    else:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"HTTP {response.status}: {error_text}"
-                        }
-        
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+        target_chat_id = chat_id or self.curator_chat_id
+        return await self._send_telegram_message(target_chat_id, message, "HTML")
     
     async def _send_approval_buttons(self, chat_id: str = None) -> Dict[str, Any]:
         """
@@ -250,71 +266,34 @@ class CuratorApprovalService:
         Returns:
             Результат отправки
         """
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            
-            target_chat_id = chat_id or self.curator_chat_id
-            
-            message_text = """
+        target_chat_id = chat_id or self.curator_chat_id
+        
+        message_text = """
 **📋 Дайджест готов к публикации!**
 
 Пожалуйста, проверьте дайджест и выберите действие:
 
 ✅ **Одобрить** - дайджест будет опубликован в канал
 ✏️ **Внести правки** - вы сможете отредактировать текст
-            """
-            
-            # Создаем inline клавиатуру
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "✅ Одобрить",
-                            "callback_data": "approve_digest"
-                        },
-                        {
-                            "text": "✏️ Внести правки", 
-                            "callback_data": "edit_digest"
-                        }
-                    ]
-                ]
-            }
-            
-            params = {
-                "chat_id": target_chat_id,
-                "text": message_text,
-                "parse_mode": "Markdown",
-                "reply_markup": keyboard
-            }
-            
-            connector = aiohttp.TCPConnector(ssl=True)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(url, json=params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result.get("ok"):
-                            return {
-                                "success": True,
-                                "message_id": result["result"]["message_id"]
-                            }
-                        else:
-                            error_msg = result.get("description", "Неизвестная ошибка")
-                            return {
-                                "success": False,
-                                "error": f"Telegram API: {error_msg}"
-                            }
-                    else:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"HTTP {response.status}: {error_text}"
-                        }
+        """
         
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+        # Создаем inline клавиатуру
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Одобрить",
+                        "callback_data": "approve_digest"
+                    },
+                    {
+                        "text": "✏️ Внести правки", 
+                        "callback_data": "edit_digest"
+                    }
+                ]
+            ]
+        }
+        
+        return await self._send_telegram_message(target_chat_id, message_text, "HTML", keyboard)
     
     async def handle_approval(self, callback_data: str, user_id: str) -> Dict[str, Any]:
         """
@@ -429,7 +408,7 @@ class CuratorApprovalService:
 
 **Инструкции:**
 - Сохраните структуру (заголовок, введение, новости, заключение)
-- Используйте Markdown форматирование
+- Используйте HTML форматирование
 - После отправки исправленного текста дайджест будет пересоздан
             """
             
@@ -589,68 +568,33 @@ class CuratorApprovalService:
         Returns:
             Результат отправки
         """
-        try:
-            import aiohttp
-            
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            
-            # Создаем сообщение с исправленным дайджестом
-            message_text = f"**📋 Исправленный дайджест готов!**\n\n{corrected_digest}\n\nПожалуйста, проверьте исправления и выберите действие:"
-            
-            logger.info(f"📝 Отправляемое сообщение (длина: {len(message_text)}): {message_text[:200]}...")
-            
-            # Создаем inline клавиатуру
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "✅ Одобрить",
-                            "callback_data": "approve_edited_digest"
-                        },
-                        {
-                            "text": "🔄 Еще раз отредактировать",
-                            "callback_data": "edit_digest_again"
-                        }
-                    ]
+        # Создаем сообщение с исправленным дайджестом
+        message_text = f"**📋 Исправленный дайджест готов!**\n\n{corrected_digest}\n\nПожалуйста, проверьте исправления и выберите действие:"
+        
+        logger.info(f"📝 Отправляемое сообщение (длина: {len(message_text)}): {message_text[:200]}...")
+        
+        # Создаем inline клавиатуру
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Одобрить",
+                        "callback_data": "approve_edited_digest"
+                    },
+                    {
+                        "text": "🔄 Еще раз отредактировать",
+                        "callback_data": "edit_digest_again"
+                    }
                 ]
-            }
-            
-            params = {
-                "chat_id": self.curator_chat_id,
-                "text": message_text,
-                "parse_mode": "Markdown",
-                "reply_markup": keyboard
-            }
-            
-            connector = aiohttp.TCPConnector(ssl=True)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(url, json=params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"📤 Ответ Telegram API: {result}")
-                        if result.get("ok"):
-                            logger.info("✅ Исправленный дайджест с кнопками отправлен успешно")
-                            return {
-                                "success": True,
-                                "message_id": result["result"]["message_id"]
-                            }
-                        else:
-                            logger.error(f"❌ Ошибка Telegram API: {result}")
-                            return {
-                                "success": False,
-                                "error": f"Telegram API error: {result}"
-                            }
-                    else:
-                        logger.error(f"❌ HTTP ошибка: {response.status}")
-                        return {
-                            "success": False,
-                            "error": f"HTTP error: {response.status}"
-                        }
-                        
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки исправленного дайджеста: {e}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            ]
+        }
+        
+        result = await self._send_telegram_message(self.curator_chat_id, message_text, "HTML", keyboard)
+        
+        if result["success"]:
+            logger.info("✅ Исправленный дайджест с кнопками отправлен успешно")
+        else:
+            logger.error(f"❌ Ошибка отправки исправленного дайджеста: {result['error']}")
+        
+        return result
     

@@ -178,7 +178,8 @@ class TelegramUserPublisher:
                     file=photo_path,
                     caption=content,
                     parse_mode='html',
-                    silent=silent
+                    silent=silent,
+                    link_preview=False
                 )
                 
                 logger.info("✅ Опубликовано: фото + полный текст в подписи")
@@ -191,7 +192,8 @@ class TelegramUserPublisher:
                     entity=channel_entity,
                     message=content,
                     parse_mode='html',
-                    silent=silent
+                    silent=silent,
+                    link_preview=False
                 )
                 
                 logger.info("✅ Опубликовано: только текст")
@@ -266,7 +268,8 @@ class TelegramUserPublisher:
                 file=valid_files,
                 caption=content if len(content) <= 1024 else content[:1024],  # Ограничение для медиа-группы
                 parse_mode='html',
-                silent=silent
+                silent=silent,
+                    link_preview=False
             )
             
             # Получаем первое сообщение для URL

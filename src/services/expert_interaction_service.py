@@ -7,6 +7,7 @@ Expert Interaction Service - сервис для взаимодействия с
 
 import logging
 import asyncio
+import re
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -59,8 +60,12 @@ class ExpertInteractionService:
         self.session_service = bot_session_service
         
         # Настройки напоминаний
-        self.REMINDER_INTERVAL = config.timeout.reminder_interval
-        self.CURATOR_ALERT_THRESHOLD = config.timeout.curator_alert_threshold
+        self.reminder_interval = config.timeout.reminder_interval
+        self.curator_alert_threshold = config.timeout.curator_alert_threshold
+        
+        # Константы времени
+        self.expert_session_ttl_hours = config.timeout.expert_session_ttl_hours
+        self.expert_comment_ttl_hours = config.timeout.expert_comment_ttl_hours
         
         logger.info("✅ ExpertInteractionService инициализирован")
         if curator_approval_service:
@@ -94,7 +99,7 @@ class ExpertInteractionService:
                 session_type='expert_session',
                 user_id=str(expert_id),
                 data=session_data,
-                expires_at=datetime.now() + timedelta(hours=24)
+                expires_at=datetime.now() + timedelta(hours=self.expert_session_ttl_hours)
             )
             
         except Exception as e:
@@ -183,7 +188,7 @@ class ExpertInteractionService:
                 session_type='expert_comment',
                 user_id=comment_id,
                 data=comment_data,
-                expires_at=datetime.now() + timedelta(hours=2)  # Комментарии храним 2 часа
+                expires_at=datetime.now() + timedelta(hours=self.expert_comment_ttl_hours)
             )
             
         except Exception as e:
@@ -200,7 +205,6 @@ class ExpertInteractionService:
         Returns:
             str: Очищенный текст
         """
-        import re
         
         # Разрешенные HTML теги для Telegram (HTML parse_mode)
         allowed_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'br', 'p']
@@ -335,24 +339,6 @@ class ExpertInteractionService:
 Готовы приступить к анализу? 🚀
 """
     
-    def _create_news_list(self, news_items: List[Dict]) -> str:
-        """Создает список новостей для эксперта."""
-        news_text = "📰 <b>Новости для комментирования:</b>\n\n"
-        
-        for i, news in enumerate(news_items, 1):
-            title = news.get('title', 'Без заголовка')
-            summary = news.get('summary', 'Без описания')
-            source = news.get('source_links', 'Не указан')
-            
-            # ПОЛНЫЙ ФОРМАТ без ограничений длины
-            news_text += f"""
-<b>{i}. {title}</b>
-📝 {summary}
-➡️ Источник: {source}
-
-"""
-        
-        return news_text
     
     def _split_news_list_for_expert(self, news_items: List[Dict], max_length: int = None) -> List[Dict]:
         """
@@ -394,18 +380,6 @@ class ExpertInteractionService:
         
         return parts
     
-    def _create_comment_buttons(self, news_items: List[Dict]) -> List[List[InlineKeyboardButton]]:
-        """Создает кнопки для комментирования каждой новости."""
-        buttons = []
-        
-        for i, news in enumerate(news_items, 1):
-            button = InlineKeyboardButton(
-                f"💬 Прокомментировать новость {i}",
-                callback_data=f"comment_news_{news['id']}"
-            )
-            buttons.append([button])
-        
-        return buttons
     
     def _create_comment_buttons_for_part(self, news_indices: List[int], all_news_items: List[Dict]) -> List[List[InlineKeyboardButton]]:
         """
@@ -666,7 +640,7 @@ class ExpertInteractionService:
                 return
             
             # Получаем новости, которые прокомментировал эксперт
-            from models.database import News
+            from src.models.database import News
             approved_news = []
             with database_service.get_session() as db_session:
                 for news_id in session.news_ids:
@@ -737,7 +711,7 @@ class ExpertInteractionService:
             if not session_check:
                 break
             try:
-                await asyncio.sleep(self.REMINDER_INTERVAL)
+                await asyncio.sleep(self.reminder_interval)
                 
                 session = await self._get_expert_session(expert_id)
                 if not session:
@@ -746,7 +720,7 @@ class ExpertInteractionService:
                 # Проверяем, не прошло ли 4 часа
                 time_passed = (datetime.now() - session.start_time).total_seconds()
                 
-                if time_passed >= self.CURATOR_ALERT_THRESHOLD:
+                if time_passed >= self.curator_alert_threshold:
                     # Уведомляем кураторов
                     await self._alert_curators_about_unresponsive_expert(expert_id)
                     break

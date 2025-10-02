@@ -262,7 +262,7 @@ class AIAnalysisService:
     @ai_circuit_breaker
     async def analyze_news_relevance(self, title: str, content: str) -> Optional[int]:
         """
-        Анализирует релевантность новости для ИИ-дайджеста..
+        Анализирует релевантность новости для ИИ-дайджеста.
         
         Args:
             title: Заголовок новости
@@ -320,7 +320,6 @@ class AIAnalysisService:
                 for model in models_to_try:
                     try:
                         logger.info(f"🤖 Пробуем модель {model} для анализа релевантности")
-                        import asyncio
                         loop = asyncio.get_event_loop()
                         response = await with_timeout(
                             loop.run_in_executor(
