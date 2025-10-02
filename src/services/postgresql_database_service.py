@@ -335,16 +335,7 @@ class PostgreSQLDatabaseService:
                 sources_dict = {}
                 
                 for news in news_list:
-                    # Проверяем, есть ли прямая ссылка на пост
-                    if news.source_url and news.source_channel_username:
-                        # Используем HTML-ссылку для красивого отображения @channel
-                        channel_name = news.source_channel_username.lstrip('@')
-                        source_link = f'<a href="{news.source_url}">@{channel_name}</a>'
-                        sources_dict[news.id] = [source_link]
-                        logger.debug(f"✅ Новость {news.id}: HTML-ссылка @{channel_name}")
-                        continue
-                    
-                    # Fallback: получаем источники через связь NewsSource
+                    # Получаем ВСЕ источники через связь NewsSource (приоритет над news.source_url)
                     news_sources = session.query(NewsSource).filter(
                         NewsSource.news_id == news.id
                     ).all()
@@ -359,42 +350,56 @@ class PostgreSQLDatabaseService:
                             if source:
                                 unique_sources.add(source)
                         
-                        # Создаем ссылки на все уникальные источники
+                        # Создаем ссылки на все уникальные источники (максимум 3)
                         if unique_sources:
                             source_links = []
-                            for source in unique_sources:
-                                if source.telegram_id:
+                            for source in list(unique_sources)[:3]:  # Ограничиваем до 3
+                                # Находим соответствующий NewsSource для получения source_url
+                                ns = next((ns for ns in news_sources if ns.source_id == source.id), None)
+                                
+                                if ns and ns.source_url:
+                                    # Используем конкретную ссылку на сообщение
+                                    source_link = f'<a href="{ns.source_url}">{source.name}</a>'
+                                elif source.telegram_id:
                                     # Форматируем как @channel_name с HTML-ссылкой на канал
                                     clean_telegram_id = source.telegram_id.lstrip('@')
-                                    source_link = f'<a href="https://t.me/{clean_telegram_id}">@{clean_telegram_id}</a>'
+                                    source_link = f'<a href="https://t.me/{clean_telegram_id}">{source.name}</a>'
                                 else:
                                     source_link = source.name
                                 source_links.append(source_link)
-                            sources_dict[news.id] = source_links  # Все ссылки на источники
+                            sources_dict[int(news.id)] = source_links  # Все ссылки на источники
                             logger.debug(f"✅ Новость {news.id}: источники {', '.join(source_links)}")
                         else:
-                            sources_dict[news.id] = ["Неизвестный источник"]
+                            sources_dict[int(news.id)] = ["Неизвестный источник"]
                             logger.warning(f"❌ Новость {news.id}: нет источников")
                     else:
-                        # Fallback для тестовых данных - используем разные источники для разных новостей
-                        all_sources = session.query(Source).all()
-                        if all_sources:
-                            # Используем разные источники для разных новостей
-                            source_index = news.id % len(all_sources)
-                            source = all_sources[source_index]
-                            if source.telegram_id:
-                                # Создаем ссылку на Telegram канал
-                                if source.telegram_id.startswith('@'):
-                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id[1:]})"
-                                else:
-                                    source_link = f"[{source.name}](https://t.me/{source.telegram_id})"
-                            else:
-                                source_link = source.name
-                            sources_dict[news.id] = [source_link]  # Одна ссылка на источник
-                            logger.debug(f"⚠️ Новость {news.id}: fallback источник {source_link}")
+                        # Fallback: используем news.source_url если нет связей NewsSource
+                        if news.source_url and news.source_channel_username:
+                            # Используем HTML-ссылку для красивого отображения @channel
+                            channel_name = news.source_channel_username.lstrip('@')
+                            source_link = f'<a href="{news.source_url}">@{channel_name}</a>'
+                            sources_dict[int(news.id)] = [source_link]
+                            logger.debug(f"✅ Новость {news.id}: fallback HTML-ссылка @{channel_name}")
                         else:
-                            sources_dict[news.id] = ["Неизвестный источник"]
-                            logger.warning(f"❌ Новость {news.id}: нет источников")
+                            # Fallback для тестовых данных - используем разные источники для разных новостей
+                            all_sources = session.query(Source).all()
+                            if all_sources:
+                                # Используем разные источники для разных новостей
+                                source_index = news.id % len(all_sources)
+                                source = all_sources[source_index]
+                                if source.telegram_id:
+                                    # Создаем ссылку на Telegram канал
+                                    if source.telegram_id.startswith('@'):
+                                        source_link = f"[{source.name}](https://t.me/{source.telegram_id[1:]})"
+                                    else:
+                                        source_link = f"[{source.name}](https://t.me/{source.telegram_id})"
+                                else:
+                                    source_link = source.name
+                                sources_dict[int(news.id)] = [source_link]  # Одна ссылка на источник
+                                logger.debug(f"⚠️ Новость {news.id}: fallback источник {source_link}")
+                            else:
+                                sources_dict[int(news.id)] = ["Неизвестный источник"]
+                                logger.warning(f"❌ Новость {news.id}: нет источников")
                 
                 logger.info(f"✅ Возвращаем источники для {len(sources_dict)} новостей")
                 

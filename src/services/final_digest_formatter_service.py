@@ -276,7 +276,8 @@ class FinalDigestFormatterService:
         # Добавляем источники (если переданы)
         if hasattr(self, '_current_sources') and self._current_sources:
             news_id = news.get('id') if isinstance(news, dict) else news.id
-            sources_for_news = self._current_sources.get(news_id)
+            # Пробуем найти источники по int ключу, если не найдено - по str ключу
+            sources_for_news = self._current_sources.get(news_id) or self._current_sources.get(str(news_id))
             logger.info(f"🔍 Источники для новости {news_id}: {sources_for_news}")
             sources_text = self._format_sources(news, sources_for_news)
             if sources_text:
@@ -544,7 +545,7 @@ class FinalDigestFormatterService:
         
         return titles.get(specialization, 'эксперт по ИИ')
     
-    def check_grammar_and_punctuation(self, text: str) -> str:
+    async def check_grammar_and_punctuation(self, text: str) -> str:
         """
         Проверяет и исправляет грамматику и пунктуацию с помощью AI.
         
@@ -569,7 +570,7 @@ class FinalDigestFormatterService:
             - Верни только исправленный текст
             """
             
-            corrected_text = self.ai_service.analyze_text(prompt)
+            corrected_text = await self.ai_service.analyze_text(prompt)
             
             # Если AI вернул fallback-текст, возвращаем исходный текст
             if corrected_text in ["Текст обработан успешно.", "Интересная новость в сфере искусственного интеллекта."]:

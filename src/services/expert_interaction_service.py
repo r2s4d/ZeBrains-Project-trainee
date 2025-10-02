@@ -361,7 +361,7 @@ class ExpertInteractionService:
         def format_news(i: int, news: Dict) -> str:
             title = self._clean_html_text(news.get('title', 'Без заголовка'))
             summary = self._clean_html_text(news.get('summary', 'Без описания'))
-            source = self._clean_html_text(news.get('source_links', 'Не указан'))
+            source = news.get('source_links', 'Не указан')  # Не очищаем HTML - источники уже правильно отформатированы
             
             return f"""
 {i+1}. {summary}

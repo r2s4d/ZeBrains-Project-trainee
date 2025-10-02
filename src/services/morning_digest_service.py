@@ -216,8 +216,9 @@ class MorningDigestService:
                 # Сохраняем саммари в БД
                 await self._save_summary_to_db(news.id, summary)
 
-                source_links = news.source_url or "Источник не указан"
-                logger.info(f"🔗 Источник для новости {news.id}: '{news.source_url}' -> '{source_links}'")
+                # Получаем все источники новости (максимум 3)
+                source_links = await self._get_news_sources_formatted(news.id)
+                logger.info(f"🔗 Источники для новости {news.id}: '{source_links}'")
                 
                 # Создаем объект для дайджеста
                 digest_item = DigestNews(
@@ -424,6 +425,52 @@ class MorningDigestService:
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения саммари в БД: {e}")
     
+    async def _get_news_sources_formatted(self, news_id: int) -> str:
+        """
+        Получает все источники новости, форматирует их как кликабельные ссылки.
+        Ограничивает до максимум 3 источников, разделяет запятыми.
+        
+        Args:
+            news_id: ID новости
+            
+        Returns:
+            str: Форматированный список источников с ссылками
+        """
+        try:
+            if self.database_service:
+                with self.database_service.get_session() as session:
+                    from src.models.database import NewsSource, Source
+                    
+                    # Получаем все источники новости с JOIN, ограничиваем до 3
+                    sources_data = session.query(NewsSource, Source).join(
+                        Source, NewsSource.source_id == Source.id
+                    ).filter(
+                        NewsSource.news_id == news_id
+                    ).limit(3).all()  # Ограничиваем до 3 источников
+                    
+                    if sources_data:
+                        # Форматируем источники как кликабельные ссылки
+                        source_links = []
+                        for ns, source in sources_data:
+                            if ns.source_url:
+                                # Используем конкретную ссылку на сообщение
+                                link = f'<a href="{ns.source_url}">{source.name}</a>'
+                            else:
+                                # Создаем ссылку на канал
+                                channel_id = source.telegram_id.replace("@", "")
+                                link = f'<a href="https://t.me/{channel_id}">{source.name}</a>'
+                            source_links.append(link)
+                        
+                        # Объединяем через запятую
+                        return ", ".join(source_links)
+                    else:
+                        logger.warning(f"⚠️ Источники не найдены для новости {news_id}")
+                        return "Источник не указан"
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения источников для новости {news_id}: {e}")
+            return "Источник не указан"
+    
     def _create_fallback_summary(self, news: Any) -> str:
         """
         Создает простое саммари без AI.
@@ -556,7 +603,8 @@ class MorningDigestService:
                 message = await self.bot.send_message(
                     chat_id=chat_id,
                     text=cleaned_text,
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
                 )
                 logger.info(f"✅ Сообщение отправлено через bot")
                 
@@ -632,7 +680,8 @@ class MorningDigestService:
                         message = await self.bot.send_message(
                             chat_id=chat_id,
                             text=cleaned_text,
-                            reply_markup=InlineKeyboardMarkup(part_buttons)
+                            reply_markup=InlineKeyboardMarkup(part_buttons),
+                            parse_mode="HTML"
                         )
                         message_ids.append(message.message_id)
                         logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} с {len(part_buttons)} кнопками")
@@ -645,7 +694,8 @@ class MorningDigestService:
                         cleaned_text = self._clean_html_text(part['text'])
                         message = await self.bot.send_message(
                             chat_id=chat_id,
-                            text=cleaned_text
+                            text=cleaned_text,
+                            parse_mode="HTML"
                         )
                         message_ids.append(message.message_id)
                         logger.info(f"✅ Отправлена часть {i+1} из {len(parts)} без кнопок")
@@ -668,24 +718,37 @@ class MorningDigestService:
 
     def _clean_html_text(self, text: str) -> str:
         """
-        Очищает текст от всех HTML тегов, кроме ссылок, и исправляет неправильные теги.
+        Очищает текст от неправильных HTML тегов, но сохраняет ссылки.
         
         Args:
             text: Исходный текст
             
         Returns:
-            str: Очищенный текст с правильными HTML тегами
+            str: Очищенный текст с сохраненными HTML ссылками
         """
         import re
         
         # Сначала исправляем неправильные теги типа <2>, <3>, <2,> и т.д.
         text = re.sub(r'<\d+[^>]*>', '', text)
         
-        # Удаляем все HTML теги
+        # Удаляем все HTML теги, КРОМЕ ссылок <a href="...">...</a>
+        # Сначала сохраняем ссылки
+        link_pattern = r'<a\s+href="[^"]*"[^>]*>.*?</a>'
+        links = re.findall(link_pattern, text)
+        
+        # Заменяем ссылки на плейсхолдеры
+        for i, link in enumerate(links):
+            text = text.replace(link, f'__LINK_{i}__')
+        
+        # Удаляем все остальные HTML теги
         text = re.sub(r'<[^>]*>', '', text)
         
         # Удаляем оставшиеся символы < и > которые могли остаться
         text = re.sub(r'[<>]', '', text)
+        
+        # Восстанавливаем ссылки
+        for i, link in enumerate(links):
+            text = text.replace(f'__LINK_{i}__', link)
         
         # Добавляем переносы строк для читаемости
         # После точек, восклицательных и вопросительных знаков

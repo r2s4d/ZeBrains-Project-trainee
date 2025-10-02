@@ -504,7 +504,7 @@ class CuratorApprovalService:
             logger.info(f"📝 Обработка исправленного дайджеста от куратора {user_id}")
             
             # Проверяем грамматику исправленного текста
-            corrected_text = self.formatter_service.check_grammar_and_punctuation(edited_text)
+            corrected_text = await self.formatter_service.check_grammar_and_punctuation(edited_text)
             
             # ✅ Сохраняем исправленный текст дайджеста в БД
             await self._save_current_digest(corrected_text)
